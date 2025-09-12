@@ -34,6 +34,7 @@ coverage/
 
 # Optional: GitHub-specific
 .github/
+.npmrc
 
 # Optional: local test DBs
 *.sqlite
