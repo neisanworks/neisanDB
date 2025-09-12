@@ -142,7 +142,7 @@ class Datastore<Schema extends z.ZodObject, Model extends DBModelProperties<Sche
         }
 
         for (const unique of this.uniques) {
-            if (Object.values(this.data).some((record) => record[unique] === parsed.data[unique])) {
+            if (Object.values(this.data).some((record) => record[unique] === parsed.data[unique] && record.id !== item.id)) {
                 return {
                     success: false,
                     errors: { [unique]: 'Already in use' }
