@@ -9,7 +9,6 @@ export type MethodSuccess = { success: true };
 export type MethodReturn<Return> = Prettier<MethodSuccess & { data: Return }>;
 export type MethodFailure = { success: false; errors: Record<string, any> };
 
-
 // Database Types
 export interface DBProperties {
     folder: string;
@@ -29,20 +28,17 @@ export type DatabaseClass = Prettier<
     }
 >;
 
-
 // Model Types
-export type DBModelProperties<Schema extends z.ZodObject> = Prettier<{ id: number } & z.infer<Schema>>;
-export type DBModel<
-    Schema extends z.ZodObject,
-    Model extends DBModelProperties<Schema>
-> = new (data: z.infer<Schema>, id: number) => Model;
-
+export type DBModelProperties<Schema extends z.ZodObject> = Prettier<
+    { id: number } & z.infer<Schema>
+>;
+export type DBModel<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> = new (
+    data: z.infer<Schema>,
+    id: number
+) => Model;
 
 // Datastore Types
-export interface DSProperties<
-    Schema extends z.ZodObject,
-    Model extends DBModelProperties<Schema>
-> {
+export interface DSProperties<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> {
     name: string;
     schema: Schema;
     model: DBModel<Schema, Model>;
@@ -63,13 +59,42 @@ export type DatastoreClass<
     Model extends DBModelProperties<Schema>
 > = Prettier<
     DSProperties<Schema, Model> & {
+        // Find One Methods
+        findOne(id: number): Model | null;
+        findOne(params: Partial<z.infer<Schema>>): Model | null;
+        findOne(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Model | null;
+        findOneAndUpdate(
+            id: number,
+            update: Partial<z.infer<Schema>>
+        ): MethodFailure | MethodReturn<Model>;
+        findOneAndDelete(id: number): MethodFailure | MethodReturn<Model>;
+
+        // Find Many Methods
         find(): Array<Model> | null;
-        find(id: number): Model | null;
         find(params: Partial<z.infer<Schema>>): Array<Model> | null;
-        find(params: Partial<z.infer<Schema>>, limit: 1): Model | null;
         find(params: Partial<z.infer<Schema>>, limit: number): Array<Model> | null;
-        find(params: Partial<z.infer<Schema>>, limit?: number): Array<Model> | Model | null;
+        find(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Array<Model> | null;
+        find(
+            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
+            limit: number
+        ): Array<Model> | null;
+        findAndUpdate(
+            params: Partial<z.infer<Schema>>,
+            update: Partial<z.infer<Schema>>
+        ): MethodFailure | MethodReturn<Array<Model>>;
+        findAndUpdate(
+            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
+            update: Partial<z.infer<Schema>>
+        ): MethodFailure | MethodReturn<Array<Model>>;
+        findAndDelete(params: Partial<z.infer<Schema>>): MethodFailure | MethodReturn<Array<Model>>;
+        findAndDelete(
+            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean
+        ): MethodFailure | MethodReturn<Array<Model>>;
+
+        // Create Methods
         create(data: z.infer<Schema>): MethodFailure | MethodReturn<Model>;
+
+        // Save Methods
         save(item: Model): MethodFailure | MethodReturn<Model>;
     }
 >;
