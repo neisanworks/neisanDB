@@ -1,6 +1,7 @@
-import z from "zod/v4";
-import type { DBModelProperties } from "./src/types";
-import { Database } from "./src/neisandb/database";
+import z from "zod";
+import { Database } from "./src/neisandb/database.js";
+import type { DBModelProperties } from "./src/types.js";
+
 
 const db = new Database({ autoload: true });
 

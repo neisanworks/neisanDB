@@ -1,19 +1,19 @@
-import { join } from "path";
-import { ensureDir, ensureFile } from "../utils";
-import z from "zod/v4";
 import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import z from "zod";
 import type {
-    DBModel,
-    DBModelProperties,
     DBOptions,
+    DBModelProperties,
     DSOptions,
-    FilterLookup,
+    DBModel,
     MethodFailure,
-    MethodReturn,
     MethodSuccess,
     PartialSchema,
-    SchemaErrors
-} from "../types";
+    FilterLookup,
+    SchemaErrors,
+    MethodReturn
+} from "../types.js";
+import { ensureDir, ensureFile } from "../utils.js";
 
 export class Database {
     folder: string;
@@ -55,7 +55,10 @@ class Datastore<
             this.data = JSON.parse(readFileSync(this.path, { encoding: "utf-8" }) ?? "{}");
             return { success: true };
         } catch {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
     }
 
@@ -150,7 +153,10 @@ class Datastore<
         update: PartialSchema<Schema>
     ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         if (!this.data[id]) {
@@ -180,7 +186,10 @@ class Datastore<
 
     findOneAndDelete(id: number): MethodFailure | MethodReturn<Model> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         if (!this.data[id]) {
@@ -246,7 +255,10 @@ class Datastore<
         | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
         | MethodReturn<Array<Model>> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         const parse = this.schema.safeParse(update);
@@ -293,7 +305,10 @@ class Datastore<
         lookup: PartialSchema<Schema> | FilterLookup<Schema>
     ): MethodFailure | MethodReturn<Array<Model>> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         const results = Object.entries(this.data).filter(([id, doc]) => {
@@ -333,7 +348,10 @@ class Datastore<
         | MethodReturn<Model>
         | MethodReturn<Array<Model>> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         if (Array.isArray(docs) && docs.length === 0) {
@@ -392,7 +410,10 @@ class Datastore<
         model: Model
     ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
         if (!this.ready) {
-            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
         }
 
         const parse = this.schema.safeParse(model);
