@@ -336,13 +336,13 @@ class Datastore<
     }
 
     create(
-        doc: z.core.output<Schema>
+        doc: z.core.input<Schema>
     ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model>;
     create(
-        docs: Array<z.core.output<Schema>>
+        docs: Array<z.core.input<Schema>>
     ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
     create(
-        docs: z.core.output<Schema> | Array<z.core.output<Schema>>
+        docs: z.core.input<Schema> | Array<z.core.input<Schema>>
     ):
         | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
         | MethodReturn<Model>
