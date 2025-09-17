@@ -40,6 +40,8 @@ coverage/
 *.sqlite
 *.db
 *.json
+!package.json
+!tsconfig.json
 
 # Optional: CLI history or temp files
 .history
