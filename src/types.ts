@@ -5,96 +5,48 @@ export type Prettier<T extends Record<string | number | symbol, any>> = {
     [K in keyof T]: T[K];
 } & {};
 
+
 export type MethodSuccess = { success: true };
 export type MethodReturn<Return> = Prettier<MethodSuccess & { data: Return }>;
-export type MethodFailure = { success: false; errors: Record<string, any> };
+export type MethodFailure<
+    Errors extends Record<string, string | undefined> = Record<"general", string>
+> = {
+    success: false;
+    errors: Errors;
+};
+export type SchemaErrors<Schema extends z.ZodObject> = Partial<
+    Record<keyof z.core.output<Schema>, string>
+>;
+
+export type PartialSchema<Schema extends z.ZodObject> = Partial<z.core.output<Schema>>;
+export type FilterLookup<Schema extends z.ZodObject> = (record: {
+    id: number;
+    doc: z.core.output<Schema>;
+}) => boolean;
+
 
 // Database Types
-export interface DBProperties {
-    folder: string;
-    autoload: boolean;
+export interface DBOptions {
+    folder?: string;
+    autoload?: boolean;
 }
 
-export type DBOptions = Partial<DBProperties>;
-
-export type DatabaseClass = Prettier<
-    DBProperties & {
-        collection<
-            Schema extends z.ZodObject,
-            Model extends Prettier<{ id: number } & z.infer<Schema>>
-        >(
-            options: DSOptions<Schema, Model>
-        ): DatastoreClass<Schema, Model>;
-    }
->;
-
-// Model Types
-export type DBModelProperties<Schema extends z.ZodObject> = Prettier<
-    { id: number } & z.infer<Schema>
->;
-export type DBModel<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> = new (
-    data: z.infer<Schema>,
-    id: number
-) => Model;
 
 // Datastore Types
-export interface DSProperties<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> {
+export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> {
     name: string;
     schema: Schema;
     model: DBModel<Schema, Model>;
-    uniques: Array<keyof z.infer<Schema>>;
-    autoload: boolean;
+    autoload?: boolean;
+    uniques?: Array<keyof z.infer<Schema>>;
 }
 
-export type DSOptions<
-    Schema extends z.ZodObject,
-    Model extends DBModelProperties<Schema>
-> = Prettier<
-    Omit<DSProperties<Schema, Model>, "autoload" | "uniques"> &
-        Partial<Pick<DSProperties<Schema, Model>, "autoload" | "uniques">>
->;
 
-export type DatastoreClass<
-    Schema extends z.ZodObject,
-    Model extends DBModelProperties<Schema>
-> = Prettier<
-    DSProperties<Schema, Model> & {
-        // Find One Methods
-        findOne(id: number): Model | null;
-        findOne(params: Partial<z.infer<Schema>>): Model | null;
-        findOne(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Model | null;
-        findOneAndUpdate(
-            id: number,
-            update: Partial<z.infer<Schema>>
-        ): MethodFailure | MethodReturn<Model>;
-        findOneAndDelete(id: number): MethodFailure | MethodReturn<Model>;
-
-        // Find Many Methods
-        find(): Array<Model> | null;
-        find(params: Partial<z.infer<Schema>>): Array<Model> | null;
-        find(params: Partial<z.infer<Schema>>, limit: number): Array<Model> | null;
-        find(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Array<Model> | null;
-        find(
-            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
-            limit: number
-        ): Array<Model> | null;
-        findAndUpdate(
-            params: Partial<z.infer<Schema>>,
-            update: Partial<z.infer<Schema>>
-        ): MethodFailure | MethodReturn<Array<Model>>;
-        findAndUpdate(
-            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
-            update: Partial<z.infer<Schema>>
-        ): MethodFailure | MethodReturn<Array<Model>>;
-        findAndDelete(params: Partial<z.infer<Schema>>): MethodFailure | MethodReturn<Array<Model>>;
-        findAndDelete(
-            filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean
-        ): MethodFailure | MethodReturn<Array<Model>>;
-
-        // Create Methods
-        create(data: z.infer<Schema>): MethodFailure | MethodReturn<Model>;
-
-        // Save Methods
-        save(item: Model): MethodFailure | MethodReturn<Model>;
-    }
->;
+// Database Model Types
+export type DBModelProperties<Schema extends z.ZodObject> = {
+    id: number;
+} & z.infer<Schema>;
+export type DBModel<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> = new (
+    data: z.core.output<Schema>,
+    id: number
+) => Model;

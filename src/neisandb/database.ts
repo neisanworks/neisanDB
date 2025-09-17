@@ -1,114 +1,165 @@
-import * as pt from "path";
-import * as fs from "fs";
-import z from "zod";
+import { join } from "path";
+import { ensureDir, ensureFile } from "../utils";
+import z from "zod/v4";
+import { readFileSync, writeFileSync } from "fs";
 import type {
-    DatabaseClass,
-    DatastoreClass,
     DBModel,
     DBModelProperties,
     DBOptions,
     DSOptions,
+    FilterLookup,
     MethodFailure,
     MethodReturn,
-    MethodSuccess
+    MethodSuccess,
+    PartialSchema,
+    SchemaErrors
 } from "../types";
 
-export class Database implements DatabaseClass {
+export class Database {
     folder: string;
     autoload: boolean;
 
     constructor(params: DBOptions) {
-        this.folder = params.folder ?? pt.join(process.cwd(), "neisandb");
+        this.folder = ensureDir(params.folder ?? join(process.cwd(), "neisandb"));
         this.autoload = params.autoload ?? true;
-
-        if (!fs.existsSync(this.folder)) {
-            fs.mkdirSync(this.folder, { recursive: true });
-        }
     }
 
-    collection<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>>(
-        options: DSOptions<Schema, Model>
-    ): DatastoreClass<Schema, Model> {
+    collection<
+        Shape extends z.ZodRawShape,
+        Schema extends z.ZodObject<Shape>,
+        Model extends DBModelProperties<Schema>
+    >(options: DSOptions<Schema, Model>): Datastore<Shape, Schema, Model> {
         return new Datastore(this, options);
     }
 }
 
-class Datastore<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>>
-    implements DatastoreClass<Schema, Model>
-{
-    readonly path: string;
+class Datastore<
+    Shape extends z.ZodRawShape,
+    Schema extends z.ZodObject<Shape>,
+    Model extends DBModelProperties<Schema>
+> {
     private data: Record<number, z.infer<Schema>> = {};
 
-    autoload: boolean;
     readonly name: string;
+    readonly path: string;
+    readonly autoload: boolean;
+
     readonly schema: Schema;
+    readonly shape: Shape;
     readonly model: DBModel<Schema, Model>;
 
     readonly uniques: Array<keyof z.infer<Schema>>;
 
-    constructor(database: Database, params: DSOptions<Schema, Model>) {
-        this.autoload = params.autoload ?? database.autoload;
-        this.name = params.name;
-        this.schema = params.schema;
-        this.model = params.model;
-        this.uniques = params.uniques ?? [];
-
-        this.path = pt.join(database.folder, `${this.name}.json`);
-        if (!fs.existsSync(this.path)) {
-            fs.writeFileSync(this.path, JSON.stringify({}), { encoding: "utf-8" });
-        }
-
-        if (this.autoload) {
-            const fileread = this.read();
-            if (!fileread.success) {
-                throw new Error(fileread.errors.general);
-            }
-            this.data = fileread.data;
+    private read(): MethodFailure | MethodSuccess {
+        try {
+            this.data = JSON.parse(readFileSync(this.path, { encoding: "utf-8" }) ?? "{}");
+            return { success: true };
+        } catch {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
         }
     }
 
-    findOne(id: number): Model | null;
-    findOne(params: Partial<z.infer<Schema>>): Model | null;
-    findOne(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Model | null;
-    findOne(
-        lookup:
-            | number
-            | Partial<z.infer<Schema>>
-            | ((entries: [id: number, doc: z.infer<Schema>]) => boolean)
-    ): Model | null {
-        if (typeof lookup === "number") {
-            return this.data[lookup] ? new this.model(this.data[lookup], lookup) : null;
-        } else if (typeof lookup === "function") {
-            const results = Object.entries(this.data)
-                .filter(([id, record]) => lookup([Number(id), record]))
-                .sort(([a], [b]) => Number(a) - Number(b));
-            return results.length > 0 ? new this.model(results[0][1], Number(results[0][0])) : null;
-        } else {
-            const results = Object.entries(this.data)
-                .filter(([id, record]) => {
-                    for (const param in lookup) {
-                        if (record[param] !== lookup[param]) {
-                            return false;
+    private write(): MethodFailure | MethodSuccess {
+        try {
+            writeFileSync(this.path, JSON.stringify(this.data, null, 2), { encoding: "utf-8" });
+            return { success: true };
+        } catch {
+            return { success: false, errors: { general: "Failed to write datastore file" } };
+        }
+    }
+
+    private limited(
+        results: Array<[string, z.core.output<Schema>]>,
+        limit?: number
+    ): Array<Model> | undefined {
+        const limited = limit && results.length > limit ? results.slice(0, limit) : results;
+        if (limited.length === 0) return;
+
+        return limited.map(([id, record]) => new this.model(record, Number(id)));
+    }
+
+    private get ready(): boolean {
+        if (Object.keys(this.data).length === 0) {
+            if (this.autoload) return false;
+            this.read();
+            if (Object.keys(this.data).length === 0) return false;
+        }
+
+        return true;
+    }
+
+    private get nextID(): number {
+        if (!this.ready) return 0;
+
+        const ids = Object.keys(this.data).map(Number);
+        return ids.length ? Math.max(...ids) + 1 : 0;
+    }
+
+    constructor(database: Database, params: DSOptions<Schema, Model>) {
+        this.name = params.name;
+        this.path = ensureFile(join(database.folder, `${this.name}.json`), JSON.stringify({}));
+        this.autoload = params.autoload ?? database.autoload;
+
+        this.schema = params.schema;
+        this.shape = this.schema.shape;
+        this.model = params.model;
+
+        this.uniques = params.uniques ?? [];
+
+        if (this.autoload) this.read();
+    }
+
+    findOne(id: number): Model | undefined;
+    findOne(params: PartialSchema<Schema>): Model | undefined;
+    findOne(filter: FilterLookup<Schema>): Model | undefined;
+    findOne(lookup: number | PartialSchema<Schema> | FilterLookup<Schema>): Model | undefined {
+        if (!this.ready) return;
+
+        switch (typeof lookup) {
+            case "number":
+                const record = this.data[lookup];
+                return record ? new this.model(record, lookup) : undefined;
+            case "function":
+                const functionalMatches = Object.entries(this.data)
+                    .filter(([id, doc]) => lookup({ id: Number(id), doc }))
+                    .sort(([a], [b]) => Number(a) - Number(b));
+                const functionalMatch = functionalMatches.at(0);
+                if (!functionalMatch) return;
+
+                return new this.model(functionalMatch[1], Number(functionalMatch[0]));
+            default:
+                const parameterMatches = Object.entries(this.data)
+                    .filter(([, doc]) => {
+                        for (const param in lookup) {
+                            if (doc[param] !== lookup[param]) {
+                                return false;
+                            }
                         }
-                    }
-                    return true;
-                })
-                .sort(([a], [b]) => Number(a) - Number(b));
-            return results.length > 0 ? new this.model(results[0][1], Number(results[0][0])) : null;
+                        return true;
+                    })
+                    .sort(([a], [b]) => Number(a) - Number(b));
+                const parameterMatch = parameterMatches.at(0);
+                if (!parameterMatch) return;
+
+                return new this.model(parameterMatch[1], Number(parameterMatch[0]));
         }
     }
 
     findOneAndUpdate(
         id: number,
-        update: Partial<z.infer<Schema>>
-    ): MethodFailure | MethodReturn<Model> {
+        update: PartialSchema<Schema>
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+        }
+
         if (!this.data[id]) {
-            return { success: false, errors: { general: "Record ID Does Not Exist" } };
+            return { success: false, errors: { general: "Document Not Found" } };
         }
 
         const parse = this.schema.safeParse(update);
         if (!parse.success) {
-            const errors: Partial<Record<keyof z.infer<Schema>, string>> = {};
+            const errors: SchemaErrors<Schema> = {};
             z.treeifyError(
                 parse.error,
                 (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
@@ -116,49 +167,48 @@ class Datastore<Schema extends z.ZodObject, Model extends DBModelProperties<Sche
             return { success: false, errors };
         }
 
-        const olddata = this.data;
+        const cache = this.data;
         this.data[id] = { ...this.data[id], ...parse.data };
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
         }
 
         return { success: true, data: new this.model(this.data[id], id) };
     }
 
     findOneAndDelete(id: number): MethodFailure | MethodReturn<Model> {
-        if (!this.data[id]) {
-            return { success: false, errors: { general: "Record ID Does Not Exist" } };
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
         }
 
-        const olddata = this.data;
+        if (!this.data[id]) {
+            return { success: false, errors: { general: "Document Not Found" } };
+        }
+
+        const cache = this.data;
         const data = this.data[id];
         delete this.data[id];
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
         }
 
         return { success: true, data: new this.model(data, id) };
     }
 
-    find(): Array<Model> | null;
-    find(params: Partial<z.infer<Schema>>): Array<Model> | null;
-    find(params: Partial<z.infer<Schema>>, limit: number): Array<Model> | null;
-    find(filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean): Array<Model> | null;
+    find(): Array<Model> | undefined;
+    find(params: PartialSchema<Schema>): Array<Model> | undefined;
+    find(params: PartialSchema<Schema>, limit: number): Array<Model> | undefined;
+    find(filter: FilterLookup<Schema>): Array<Model> | undefined;
+    find(filter: FilterLookup<Schema>, limit: number): Array<Model> | undefined;
     find(
-        filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
-        limit: number
-    ): Array<Model> | null;
-    find(
-        lookup?:
-            | Partial<z.infer<Schema>>
-            | ((entries: [id: number, doc: z.infer<Schema>]) => boolean),
+        lookup?: PartialSchema<Schema> | FilterLookup<Schema>,
         limit?: number
-    ): Array<Model> | null {
-        if (Object.keys(this.data).length < 1) return null;
+    ): Array<Model> | undefined {
+        if (!this.ready) return;
 
         if (!lookup) {
             return Object.entries(this.data).map(
@@ -166,154 +216,190 @@ class Datastore<Schema extends z.ZodObject, Model extends DBModelProperties<Sche
             );
         }
 
-        if (typeof lookup === "function") {
-            const results = Object.entries(this.data)
-                .filter(([id, record]) => lookup([Number(id), record]))
-                .sort(([a], [b]) => Number(a) - Number(b));
-            const limited = results.slice(0, Math.min(limit ?? Infinity, results.length));
-            return limited.length > 0
-                ? limited.map(([id, record]) => new this.model(record, Number(id)))
-                : null;
-        }
-
         const results = Object.entries(this.data)
-            .filter(([id, record]) => {
+            .filter(([id, doc]) => {
+                if (typeof lookup === "function") return lookup({ id: Number(id), doc });
+
                 for (const param in lookup) {
-                    if (record[param] !== lookup[param]) {
+                    if (doc[param] !== lookup[param]) {
                         return false;
                     }
                 }
                 return true;
             })
             .sort(([a], [b]) => Number(a) - Number(b));
-        const limited = results.slice(0, Math.min(limit ?? Infinity, results.length));
-        return limited.length > 0
-            ? limited.map(([id, record]) => new this.model(record, Number(id)))
-            : null;
+        return this.limited(results, limit);
     }
 
     findAndUpdate(
-        params: Partial<z.infer<Schema>>,
-        update: Partial<z.infer<Schema>>
-    ): MethodFailure | MethodReturn<Array<Model>>;
+        params: PartialSchema<Schema>,
+        update: PartialSchema<Schema>
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
     findAndUpdate(
-        filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean,
-        update: Partial<z.infer<Schema>>
-    ): MethodFailure | MethodReturn<Array<Model>>;
+        filter: FilterLookup<Schema>,
+        update: PartialSchema<Schema>
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
     findAndUpdate(
-        lookup:
-            | Partial<z.infer<Schema>>
-            | ((entries: [id: number, doc: z.infer<Schema>]) => boolean),
-        update: Partial<z.infer<Schema>>
-    ): MethodFailure | MethodReturn<Array<Model>> {
-        const results = Object.entries(this.data).filter(([id, record]) => {
-            if (typeof lookup === "function") return lookup([Number(id), record]);
-
-            for (const param in lookup) {
-                if (record[param] !== lookup[param]) {
-                    return false;
-                }
-            }
-            return true;
-        });
-        if (results.length < 1) {
-            return { success: false, errors: { general: "No records found" } };
+        lookup: PartialSchema<Schema> | FilterLookup<Schema>,
+        update: PartialSchema<Schema>
+    ):
+        | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
+        | MethodReturn<Array<Model>> {
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
         }
 
-        const olddata = this.data;
-        for (const [id, record] of results) {
-            this.data[Number(id)] = { ...record, ...update };
-        }
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
-        }
-
-        return {
-            success: true,
-            data: results.map(([id, record]) => new this.model(record, Number(id)))
-        };
-    }
-
-    findAndDelete(params: Partial<z.infer<Schema>>): MethodFailure | MethodReturn<Array<Model>>;
-    findAndDelete(
-        filter: (entries: [id: number, doc: z.infer<Schema>]) => boolean
-    ): MethodFailure | MethodReturn<Array<Model>>;
-    findAndDelete(
-        lookup:
-            | Partial<z.infer<Schema>>
-            | ((entries: [id: number, doc: z.infer<Schema>]) => boolean)
-    ): MethodFailure | MethodReturn<Array<Model>> {
-        const results = Object.entries(this.data).filter(([id, record]) => {
-            if (typeof lookup === "function") return lookup([Number(id), record]);
-
-            for (const param in lookup) {
-                if (record[param] !== lookup[param]) {
-                    return false;
-                }
-            }
-            return true;
-        });
-        if (results.length < 1) {
-            return { success: false, errors: { general: "No records found" } };
-        }
-
-        const olddata = this.data;
-        for (const [id] of results) {
-            delete this.data[Number(id)];
-        }
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
-        }
-
-        return {
-            success: true,
-            data: results.map(([id, record]) => new this.model(record, Number(id)))
-        };
-    }
-
-    create(data: z.core.output<Schema>): MethodFailure | MethodReturn<Model> {
-        const parsed = this.schema.safeParse(data);
-        if (!parsed.success) {
-            const errors: Partial<Record<keyof z.infer<Schema>, string>> = {};
+        const parse = this.schema.safeParse(update);
+        if (!parse.success) {
+            const errors: SchemaErrors<Schema> = {};
             z.treeifyError(
-                parsed.error,
+                parse.error,
                 (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
             );
             return { success: false, errors };
         }
 
-        for (const unique of this.uniques) {
-            if (Object.values(this.data).some((record) => record[unique] === parsed.data[unique])) {
-                return {
-                    success: false,
-                    errors: { [unique]: "Already in use" }
-                };
+        const results = Object.entries(this.data).filter(([id, doc]) => {
+            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
+
+            for (const param in lookup) {
+                if (doc[param] !== lookup[param]) {
+                    return false;
+                }
             }
+            return true;
+        });
+
+        const cache = this.data;
+        const updated = results.map<[id: string, doc: z.infer<Schema>]>(([id, doc]) => [
+            id,
+            { ...doc, ...parse.data }
+        ]);
+        for (const [id, doc] of updated) {
+            this.data[Number(id)] = doc;
+        }
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
         }
 
-        const olddata = this.data;
-        const id = this.nextID();
-        this.data[id] = parsed.data;
-
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
-        }
-
-        return { success: true, data: new this.model(parsed.data, id) };
+        return { success: true, data: updated.map(([id, doc]) => new this.model(doc, Number(id))) };
     }
 
-    save(item: Model): MethodFailure | MethodReturn<Model> {
-        const parsed = this.schema.safeParse(item);
-        if (!parsed.success) {
-            const errors: Partial<Record<keyof z.infer<Schema>, string>> = {};
+    findAndDelete(params: PartialSchema<Schema>): MethodFailure | MethodReturn<Array<Model>>;
+    findAndDelete(filter: FilterLookup<Schema>): MethodFailure | MethodReturn<Array<Model>>;
+    findAndDelete(
+        lookup: PartialSchema<Schema> | FilterLookup<Schema>
+    ): MethodFailure | MethodReturn<Array<Model>> {
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+        }
+
+        const results = Object.entries(this.data).filter(([id, doc]) => {
+            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
+
+            for (const param in lookup) {
+                if (doc[param] !== lookup[param]) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        const cache = this.data;
+        for (const [id] of results) {
+            delete this.data[Number(id)];
+        }
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
+        }
+
+        return { success: true, data: results.map(([id, doc]) => new this.model(doc, Number(id))) };
+    }
+
+    create(
+        doc: z.core.output<Schema>
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model>;
+    create(
+        docs: Array<z.core.output<Schema>>
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
+    create(
+        docs: z.core.output<Schema> | Array<z.core.output<Schema>>
+    ):
+        | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
+        | MethodReturn<Model>
+        | MethodReturn<Array<Model>> {
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+        }
+
+        if (Array.isArray(docs) && docs.length === 0) {
+            return { success: false, errors: { general: "No documents provided" } };
+        }
+
+        const cache = this.data;
+        const created: Array<[number, z.core.output<Schema>]> = [];
+
+        for (const doc of Array.isArray(docs) ? docs : [docs]) {
+            const parse = this.schema.safeParse(doc);
+            if (!parse.success) {
+                const errors: SchemaErrors<Schema> = {};
+                z.treeifyError(
+                    parse.error,
+                    (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
+                );
+                return { success: false, errors };
+            }
+
+            for (const unique of this.uniques) {
+                if (
+                    Object.values(this.data).some((record) => record[unique] === parse.data[unique])
+                ) {
+                    return {
+                        success: false,
+                        errors: { [unique]: "Already in use" } as SchemaErrors<Schema>
+                    };
+                }
+            }
+
+            const id = this.nextID;
+            this.data[id] = parse.data;
+            created.push([id, parse.data]);
+        }
+
+        if (created.length === 0) {
+            return { success: false, errors: { general: "Failed to create document" } };
+        }
+
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
+        }
+
+        const models = created.map(([id, doc]) => new this.model(doc, id));
+        if (Array.isArray(docs)) {
+            return { success: true, data: models };
+        }
+
+        return { success: true, data: models[0] as Model };
+    }
+
+    save(
+        model: Model
+    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
+        if (!this.ready) {
+            return { success: false, errors: { general: `Failed to read datastore file: ${this.path}` } };
+        }
+
+        const parse = this.schema.safeParse(model);
+        if (!parse.success) {
+            const errors: SchemaErrors<Schema> = {};
             z.treeifyError(
-                parsed.error,
+                parse.error,
                 (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
             );
             return { success: false, errors };
@@ -323,50 +409,24 @@ class Datastore<Schema extends z.ZodObject, Model extends DBModelProperties<Sche
             if (
                 Object.entries(this.data).some(
                     ([id, record]) =>
-                        record[unique] === parsed.data[unique] && Number(id) !== item.id
+                        record[unique] === parse.data[unique] && Number(id) !== model.id
                 )
             ) {
                 return {
                     success: false,
-                    errors: { [unique]: "Already in use" }
+                    errors: { [unique]: "Already in use" } as SchemaErrors<Schema>
                 };
             }
         }
 
-        const olddata = this.data;
-        this.data[item.id] = parsed.data;
-
-        const filewrite = this.write();
-        if (!filewrite.success) {
-            this.data = olddata;
-            return filewrite;
+        const cache = this.data;
+        this.data[model.id] = parse.data;
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
         }
 
-        return { success: true, data: new this.model(parsed.data, item.id) };
-    }
-
-    private read(): MethodFailure | MethodReturn<Record<number, z.infer<Schema>>> {
-        try {
-            return {
-                success: true,
-                data: JSON.parse(fs.readFileSync(this.path, { encoding: "utf-8" }))
-            };
-        } catch {
-            return { success: false, errors: { general: "Could not read file" } };
-        }
-    }
-
-    private write(): MethodFailure | MethodSuccess {
-        try {
-            fs.writeFileSync(this.path, JSON.stringify(this.data, null, 2), { encoding: "utf-8" });
-            return { success: true };
-        } catch {
-            return { success: false, errors: { general: "Could not write to file" } };
-        }
-    }
-
-    private nextID(): number {
-        const keys = Object.keys(this.data).map(Number);
-        return keys.length ? Math.max(...keys) + 1 : 0;
+        return { success: true, data: new this.model(parse.data, model.id) };
     }
 }
