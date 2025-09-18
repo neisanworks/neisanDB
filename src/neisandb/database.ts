@@ -470,3 +470,24 @@ class Datastore<
         return { success: true };
     }
 }
+
+export abstract class CollectionModel<Schema extends z.ZodObject> {
+    schema: Schema;
+
+    constructor(schema: Schema) {
+        this.schema = schema;
+    }
+
+    get json(): z.core.output<Schema> {
+        const parsed = this.schema.safeParse(this);
+        if (!parsed.success) {
+            const errors: SchemaErrors<Schema> = {};
+            z.treeifyError(
+                parsed.error,
+                (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
+            );
+            throw new Error(JSON.stringify(errors));
+        }
+        return parsed.data;
+    }
+}
