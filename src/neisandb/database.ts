@@ -84,8 +84,8 @@ class Datastore<
     private get ready(): boolean {
         if (Object.keys(this.data).length === 0) {
             if (this.autoload) return false;
-            this.read();
-            if (Object.keys(this.data).length === 0) return false;
+            const read = this.read();
+            if (!read.success) return false;
         }
 
         return true;
