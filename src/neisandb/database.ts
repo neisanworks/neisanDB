@@ -450,4 +450,23 @@ class Datastore<
 
         return { success: true, data: new this.model(parse.data, model.id) };
     }
+
+    delete(model: Model): MethodFailure | MethodSuccess {
+        if (!this.ready) {
+            return {
+                success: false,
+                errors: { general: `Failed to read datastore file: ${this.path}` }
+            };
+        }
+
+        const cache = this.data;
+        delete this.data[model.id];
+        const write = this.write();
+        if (!write.success) {
+            this.data = cache;
+            return write;
+        }
+
+        return { success: true };
+    }
 }
