@@ -127,5 +127,5 @@ Example:
 | `MethodResult<T>`        | Result type for safe actions        |
 | `Prettier<T>`            | Utility to flatten & preserve types |
 ## 📜 License
-MIT — © 2025 Your Name
+MIT — © 2025 neisanworks
 
