@@ -1,5 +1,13 @@
-import { readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import {
+    closeSync,
+    fsyncSync,
+    openSync,
+    readFileSync,
+    renameSync,
+    writeFileSync,
+    writeSync
+} from "fs";
+import { dirname, join } from "path";
 import z from "zod";
 import type {
     DBOptions,
@@ -13,7 +21,7 @@ import type {
     SchemaErrors,
     MethodReturn
 } from "../types.js";
-import { ensureDir, ensureFile } from "../utils.js";
+import { deepMatch, ensureDir, ensureFile } from "../utils.js";
 
 export class Database {
     folder: string;
@@ -63,12 +71,31 @@ class Datastore<
     }
 
     private write(): MethodFailure | MethodSuccess {
+        const folder = dirname(this.path);
+        const temppath = join(folder, `${this.name}.${Date.now()}-${Math.random()}.tmp`);
+        const file = openSync(temppath, "w");
+
         try {
-            writeFileSync(this.path, JSON.stringify(this.data, null, 2), { encoding: "utf-8" });
-            return { success: true };
+            writeSync(file, JSON.stringify(this.data, null, 2));
+            fsyncSync(file);
         } catch {
             return { success: false, errors: { general: "Failed to write datastore file" } };
+        } finally {
+            closeSync(file);
         }
+
+        renameSync(temppath, this.path);
+
+        const directory = openSync(folder, "r");
+        try {
+            fsyncSync(directory);
+        } catch {
+            return { success: false, errors: { general: "Failed to sync directory" } };
+        } finally {
+            closeSync(directory);
+        }
+
+        return { success: true };
     }
 
     private limited(
@@ -94,7 +121,12 @@ class Datastore<
         if (!this.ready) return 0;
 
         const ids = Object.keys(this.data).map(Number);
-        return ids.length ? Math.max(...ids) + 1 : 0;
+        return ids.length ? Math.max(...ids) + 1 : 1;
+    }
+
+    load() {
+        this.read();
+        return this.ready;
     }
 
     constructor(database: Database, params: DSOptions<Schema, Model>) {
@@ -117,34 +149,19 @@ class Datastore<
     findOne(lookup: number | PartialSchema<Schema> | FilterLookup<Schema>): Model | undefined {
         if (!this.ready) return;
 
-        switch (typeof lookup) {
-            case "number":
-                const record = this.data[lookup];
-                return record ? new this.model(record, lookup) : undefined;
-            case "function":
-                const functionalMatches = Object.entries(this.data)
-                    .filter(([id, doc]) => lookup({ id: Number(id), doc }))
-                    .sort(([a], [b]) => Number(a) - Number(b));
-                const functionalMatch = functionalMatches.at(0);
-                if (!functionalMatch) return;
-
-                return new this.model(functionalMatch[1], Number(functionalMatch[0]));
-            default:
-                const parameterMatches = Object.entries(this.data)
-                    .filter(([, doc]) => {
-                        for (const param in lookup) {
-                            if (doc[param] !== lookup[param]) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    })
-                    .sort(([a], [b]) => Number(a) - Number(b));
-                const parameterMatch = parameterMatches.at(0);
-                if (!parameterMatch) return;
-
-                return new this.model(parameterMatch[1], Number(parameterMatch[0]));
+        if (typeof lookup === "number") {
+            const record = this.data[lookup];
+            return record ? new this.model(record, lookup) : undefined;
         }
+
+        const results = Object.entries(this.data).filter(([id, doc]) => {
+            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
+
+            return deepMatch(doc, lookup);
+        });
+        const match = results.at(0);
+
+        return match ? new this.model(match[1], Number(match[0])) : undefined;
     }
 
     findOneAndUpdate(
@@ -224,18 +241,11 @@ class Datastore<
             );
         }
 
-        const results = Object.entries(this.data)
-            .filter(([id, doc]) => {
-                if (typeof lookup === "function") return lookup({ id: Number(id), doc });
+        const results = Object.entries(this.data).filter(([id, doc]) => {
+            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
 
-                for (const param in lookup) {
-                    if (doc[param] !== lookup[param]) {
-                        return false;
-                    }
-                }
-                return true;
-            })
-            .sort(([a], [b]) => Number(a) - Number(b));
+            return deepMatch(doc, lookup);
+        });
         return this.limited(results, limit);
     }
 
@@ -273,12 +283,7 @@ class Datastore<
         const results = Object.entries(this.data).filter(([id, doc]) => {
             if (typeof lookup === "function") return lookup({ id: Number(id), doc });
 
-            for (const param in lookup) {
-                if (doc[param] !== lookup[param]) {
-                    return false;
-                }
-            }
-            return true;
+            return deepMatch(doc, lookup);
         });
 
         const cache = this.data;
@@ -313,12 +318,7 @@ class Datastore<
         const results = Object.entries(this.data).filter(([id, doc]) => {
             if (typeof lookup === "function") return lookup({ id: Number(id), doc });
 
-            for (const param in lookup) {
-                if (doc[param] !== lookup[param]) {
-                    return false;
-                }
-            }
-            return true;
+            return deepMatch(doc, lookup);
         });
 
         const cache = this.data;

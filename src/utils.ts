@@ -1,34 +1,51 @@
 import { existsSync, mkdirSync, writeFileSync, type WriteFileOptions } from "fs";
+import { dirname } from "path";
 
-/**
- * Ensures a directory exists at the given path, creating the directory if it does not exist.
- * Recursively creates all parent directories if they do not exist.
- * @param directory The path to the directory
- * @returns The path to the directory
- */
 export function ensureDir(directory: string): string {
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
     return directory;
 }
 
-/**
- * Ensures a file exists at the given filepath, creating the file if it does not exist.
- * If the file does not exist, the directory path to the file is also ensured.
- * The defaultContent is written to the file with the given options.
- * @param filepath The path to the file
- * @param defaultContent The content to write to the file if it does not exist
- * @param options The options to use when writing the file
- * @returns The filepath
- */
 export function ensureFile(
     filepath: string,
     defaultContent: any,
     options: WriteFileOptions = { encoding: "utf-8" }
 ): string {
     if (!existsSync(filepath)) {
-        const directory = filepath.split("/").slice(0, -1).join("/");
+        const directory = dirname(filepath);
         ensureDir(directory);
-        writeFileSync(filepath, defaultContent, options);
+
+        const content =
+            typeof defaultContent === "object"
+                ? JSON.stringify(defaultContent, null, 2)
+                : defaultContent;
+        writeFileSync(filepath, content, options);
     }
     return filepath;
+}
+
+export function deepMatch(item: any, partial: any): boolean {
+    if (typeof partial !== "object" || partial === null) {
+        if (typeof partial === "string") {
+            return typeof item === "string" ? item.toLowerCase() === partial.toLowerCase() : false;
+        }
+
+        return item === partial;
+    }
+
+    if (partial instanceof Date) {
+        return item instanceof Date
+            ? item.getTime() === partial.getTime()
+            : new Date(item).getTime() === partial.getTime();
+    }
+
+    if (Array.isArray(partial)) {
+        if (!Array.isArray(item)) return false;
+
+        return partial.every((lookup) => item.some((value) => deepMatch(value, lookup)));
+    }
+
+    return Object.entries(partial).every(([key, value]) => {
+        return deepMatch(item?.[key], value);
+    });
 }

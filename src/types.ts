@@ -4,8 +4,11 @@ import * as z from "zod/v4";
 export type Prettier<T extends Record<string | number | symbol, any>> = {
     [K in keyof T]: T[K];
 } & {};
+export type DeepPartial<T extends Record<string | number | symbol, any>> = {
+    [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
 
-
+// Method Return Types
 export type MethodSuccess = { success: true };
 export type MethodReturn<Return> = Prettier<MethodSuccess & { data: Return }>;
 export type MethodFailure<
@@ -18,19 +21,11 @@ export type SchemaErrors<Schema extends z.ZodObject> = Partial<
     Record<keyof z.core.output<Schema>, string>
 >;
 
-export type PartialSchema<Schema extends z.ZodObject> = Partial<z.core.output<Schema>>;
-export type FilterLookup<Schema extends z.ZodObject> = (record: {
-    id: number;
-    doc: z.core.output<Schema>;
-}) => boolean;
-
-
 // Database Types
 export interface DBOptions {
     folder?: string;
     autoload?: boolean;
 }
-
 
 // Datastore Types
 export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> {
@@ -40,7 +35,11 @@ export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProp
     autoload?: boolean;
     uniques?: Array<keyof z.infer<Schema>>;
 }
-
+export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.output<Schema>>;
+export type FilterLookup<Schema extends z.ZodObject> = (record: {
+    id: number;
+    doc: z.core.output<Schema>;
+}) => boolean;
 
 // Database Model Types
 export type DBModelProperties<Schema extends z.ZodObject> = {

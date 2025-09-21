@@ -2,13 +2,12 @@ import z from "zod";
 import { Database } from "./src/neisandb/database.js";
 import type { DBModelProperties } from "./src/types.js";
 
-
 const db = new Database({ autoload: true });
 
 const UserSchema = z.object({
     email: z.string(),
     password: z.string(),
-    attempts: z.number()
+    attempts: z.number().default(0)
 });
 type UserSchema = typeof UserSchema;
 
@@ -37,10 +36,10 @@ const Users = db.collection({
     uniques: ["email"]
 });
 const createAdmin = Users.create({
-    email: "emmanuel.n.bynum@gmail.com",
-    password: "swagg.101",
-    attempts: 0
+    email: "admin@gmail.com",
+    password: "adminPassword"
 });
+
 if (!createAdmin.success) {
     console.log(createAdmin.errors);
 } else {
@@ -49,16 +48,21 @@ if (!createAdmin.success) {
 }
 
 const createUser = Users.create({
-    email: "emmanuel.n.bynum@gmail.com",
-    password: "swagg.101",
-    attempts: 0
+    email: "user@gmail.com",
+    password: "userPassword"
 });
 if (!createUser.success) {
     console.log(createUser.errors);
 } else {
     const user = createUser.data;
-    console.log(Users.findOne(user.id));
+    console.log(Users.find({ email: user.email }));
 }
 
-const users = Users.find(({ doc }) => doc.email === "emmanuel.n.bynum@gmail.com");
+const users = Users.find(({ doc }) => doc.email === "admin@gmail.com");
 console.log(users);
+
+if (users && users.length > 0) {
+    users.forEach((user) => Users.delete(user))
+}
+
+Users.findAndDelete(({ doc }) => doc.email === "admin@gmail.com");
