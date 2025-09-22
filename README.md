@@ -13,7 +13,7 @@
 - Schema-level uniqueness enforcement across one or more fields
 - Atomic `.create()`, `.save()`, `.delete()` operations with rollback on failure
 - Automatic file creation and folder setup if not present
-- Built-in error handling via consistent return types: MethodSuccess or MethodFailure
+- Built-in error handling via consistent return types: `MethodSuccess` or `MethodFailure`
 - Automatic ID management for records
 - Extensible architecture (new collections/models are easy to add)
 
@@ -92,7 +92,7 @@ const Users = db.collection({
 ### 4. Use the Database
 
 ```ts
-// Create a user, receiving MethodFailure or MethodReturn with the model as `createdUser.data`
+// Create a user, receiving `MethodFailure` or `MethodReturn` with the model as `createdUser.data`
 const createUser = Users.create({
     email: "test@example.com",
     password: "hunter2",
@@ -115,7 +115,7 @@ if (found) {
 
 ## Output Files
 
-Each collection is stored in its own .json file under your folder path, using atomic writing to ensure data remains uncorrupted:
+Each collection is stored in its own `.json` file under your folder path, using atomic writing to ensure data remains uncorrupted:
 
 ```
 neisandb

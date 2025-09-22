@@ -21,7 +21,7 @@ import type {
     SchemaErrors,
     MethodReturn
 } from "../types.js";
-import { deepMatch, ensureDir, ensureFile } from "../utils.js";
+import { deepMatch, ensureDir, ensureFile, isPartialLookup } from "../utils.js";
 
 export class Database {
     folder: string;
@@ -46,7 +46,7 @@ class Datastore<
     Schema extends z.ZodObject<Shape>,
     Model extends DBModelProperties<Schema>
 > {
-    private data: Record<number, z.infer<Schema>> = {};
+    private data: Record<number, z.core.output<Schema>> = {};
 
     readonly name: string;
     readonly path: string;
@@ -56,11 +56,14 @@ class Datastore<
     readonly shape: Shape;
     readonly model: DBModel<Schema, Model>;
 
-    readonly uniques: Array<keyof z.infer<Schema>>;
+    readonly uniques: Array<keyof z.core.output<Schema>>;
+    private readonly indexes: Array<keyof z.core.output<Schema>>;
+    private index = new Map<keyof z.core.output<Schema>, Map<any, Array<number>>>();
 
     private read(): MethodFailure | MethodSuccess {
         try {
             this.data = JSON.parse(readFileSync(this.path, { encoding: "utf-8" }) ?? "{}");
+            this.buildIndex();
             return { success: true };
         } catch {
             return {
@@ -68,6 +71,20 @@ class Datastore<
                 errors: { general: `Failed to read datastore file: ${this.path}` }
             };
         }
+    }
+
+    private buildIndex(): void {
+        this.index.clear();
+
+        this.indexes.forEach((key) => {
+            const map = new Map<any, Array<number>>();
+            Object.entries(this.data).forEach(([id, doc]) => {
+                const value = doc[key];
+                map.set(value, [...(map.get(value) ?? []), Number(id)]);
+            });
+
+            this.index.set(key, map);
+        });
     }
 
     private write(): MethodFailure | MethodSuccess {
@@ -94,6 +111,8 @@ class Datastore<
         } finally {
             closeSync(directory);
         }
+
+        this.buildIndex();
 
         return { success: true };
     }
@@ -139,6 +158,7 @@ class Datastore<
         this.model = params.model;
 
         this.uniques = params.uniques ?? [];
+        this.indexes = params.indexes ?? [];
 
         if (this.autoload) this.read();
     }
@@ -152,6 +172,30 @@ class Datastore<
         if (typeof lookup === "number") {
             const record = this.data[lookup];
             return record ? new this.model(record, lookup) : undefined;
+        }
+
+        if (isPartialLookup(lookup, this.schema)) {
+            for (const key of this.index.keys()) {
+                if (!Object.hasOwn(lookup, key)) continue;
+
+                const value = lookup[key];
+                const matchedIDs = this.index.get(key)!.get(value);
+                if (!matchedIDs) continue;
+
+                for (const id of matchedIDs) {
+                    const record = this.data[id];
+                    if (!record) continue;
+
+                    if (this.uniques.includes(key)) {
+                        return new this.model(record, id);
+                    }
+
+                    const matches = Object.entries(lookup).every(
+                        ([k, v]) => record[k as keyof typeof lookup] === v
+                    );
+                    if (matches) return new this.model(record, id);
+                }
+            }
         }
 
         const results = Object.entries(this.data).filter(([id, doc]) => {
@@ -241,6 +285,34 @@ class Datastore<
             );
         }
 
+        if (isPartialLookup(lookup, this.schema)) {
+            for (const key of this.index.keys()) {
+                if (!Object.hasOwn(lookup, key)) continue;
+
+                const value = lookup[key];
+                const matchedIDs = this.index.get(key)!.get(value);
+                if (!matchedIDs) continue;
+
+                const matches = matchedIDs
+                    .map((id) => {
+                        const record = this.data[id];
+                        if (!record) return;
+
+                        if (this.uniques.includes(key)) {
+                            return [String(id), record] as [string, z.core.output<Schema>];
+                        }
+
+                        const matches = Object.entries(lookup).every(
+                            ([k, v]) => record[k as keyof typeof lookup] === v
+                        );
+                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
+                    })
+                    .filter((item) => item !== undefined);
+
+                if (matches.length > 0) return this.limited(matches);
+            }
+        }
+
         const results = Object.entries(this.data).filter(([id, doc]) => {
             if (typeof lookup === "function") return lookup({ id: Number(id), doc });
 
@@ -280,6 +352,53 @@ class Datastore<
             return { success: false, errors };
         }
 
+        if (isPartialLookup(lookup, this.schema)) {
+            for (const key of this.index.keys()) {
+                if (!Object.hasOwn(lookup, key)) continue;
+
+                const value = lookup[key];
+                const matchedIDs = this.index.get(key)!.get(value);
+                if (!matchedIDs) continue;
+
+                const matches = matchedIDs
+                    .map((id) => {
+                        const record = this.data[id];
+                        if (!record) return;
+
+                        if (this.uniques.includes(key)) {
+                            return [String(id), record] as [string, z.core.output<Schema>];
+                        }
+
+                        const matches = Object.entries(lookup).every(
+                            ([k, v]) => record[k as keyof typeof lookup] === v
+                        );
+                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
+                    })
+                    .filter((item) => item !== undefined);
+
+                if (matches.length > 0) {
+                    const cache = this.data;
+                    const updated = matches.map<[id: string, doc: z.infer<Schema>]>(([id, doc]) => [
+                        id,
+                        { ...doc, ...parse.data }
+                    ]);
+                    for (const [id, doc] of updated) {
+                        this.data[Number(id)] = doc;
+                    }
+                    const write = this.write();
+                    if (!write.success) {
+                        this.data = cache;
+                        return write;
+                    }
+
+                    return {
+                        success: true,
+                        data: updated.map(([id, doc]) => new this.model(doc, Number(id)))
+                    };
+                }
+            }
+        }
+
         const results = Object.entries(this.data).filter(([id, doc]) => {
             if (typeof lookup === "function") return lookup({ id: Number(id), doc });
 
@@ -313,6 +432,49 @@ class Datastore<
                 success: false,
                 errors: { general: `Failed to read datastore file: ${this.path}` }
             };
+        }
+
+        if (isPartialLookup(lookup, this.schema)) {
+            for (const key of this.index.keys()) {
+                if (!Object.hasOwn(lookup, key)) continue;
+
+                const value = lookup[key];
+                const matchedIDs = this.index.get(key)!.get(value);
+                if (!matchedIDs) continue;
+
+                const matches = matchedIDs
+                    .map((id) => {
+                        const record = this.data[id];
+                        if (!record) return;
+
+                        if (this.uniques.includes(key)) {
+                            return [String(id), record] as [string, z.core.output<Schema>];
+                        }
+
+                        const matches = Object.entries(lookup).every(
+                            ([k, v]) => record[k as keyof typeof lookup] === v
+                        );
+                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
+                    })
+                    .filter((item) => item !== undefined);
+
+                if (matches.length > 0) {
+                    const cache = this.data;
+                    for (const [id] of matches) {
+                        delete this.data[Number(id)];
+                    }
+                    const write = this.write();
+                    if (!write.success) {
+                        this.data = cache;
+                        return write;
+                    }
+
+                    return {
+                        success: true,
+                        data: matches.map(([id, doc]) => new this.model(doc, Number(id)))
+                    };
+                }
+            }
         }
 
         const results = Object.entries(this.data).filter(([id, doc]) => {

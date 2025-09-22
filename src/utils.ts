@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync, type WriteFileOptions } from "fs";
 import { dirname } from "path";
+import type { PartialSchema } from "./types.js";
+import z from "zod/v4";
 
 export function ensureDir(directory: string): string {
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
@@ -22,6 +24,16 @@ export function ensureFile(
         writeFileSync(filepath, content, options);
     }
     return filepath;
+}
+
+export function isPartialLookup<Schema extends z.ZodObject>(
+    lookup: unknown,
+    schema: Schema
+): lookup is PartialSchema<Schema> {
+    if (!lookup || typeof lookup !== "object" || Array.isArray(lookup)) return false;
+
+    const keys = schema.keyof();
+    return Object.keys(lookup).every((key) => keys.safeParse(key).success);
 }
 
 export function deepMatch(item: any, partial: any): boolean {

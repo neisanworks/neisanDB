@@ -33,7 +33,8 @@ export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProp
     schema: Schema;
     model: DBModel<Schema, Model>;
     autoload?: boolean;
-    uniques?: Array<keyof z.infer<Schema>>;
+    uniques?: Array<keyof z.core.output<Schema>>;
+    indexes?: Array<keyof z.core.output<Schema>>;
 }
 export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.output<Schema>>;
 export type FilterLookup<Schema extends z.ZodObject> = (record: {
