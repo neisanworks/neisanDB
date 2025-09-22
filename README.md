@@ -10,6 +10,7 @@
 - Zod-powered schemas for strict runtime validation and type inference
 - Custom model classes with methods, virtual getters, and schema enforcement
 - Deep partial `.findOne()`, `.find()` querying via object shape or functional filters
+- Indexing record ids using model properties/keys for faster lookups
 - Schema-level uniqueness enforcement across one or more fields
 - Atomic `.create()`, `.save()`, `.delete()` operations with rollback on failure
 - Automatic file creation and folder setup if not present
