@@ -117,13 +117,13 @@ if (found) {
 
 Each collection is stored in its own .json file under your folder path, using atomic writing to ensure data remains uncorrupted:
 
-```bash
-/neisandb/
-└── /data/
-|   └── users-${Date.now()}-${Math.random()}.tmp # Temporary file cteated during atomic file writing;
-|   └── users.json # Users datastore file
-└── /models/
-|   └── user.ts # Users datastore model
+```
+neisandb
+├── data
+│   └── users-${Date.now()}-${Math.random()}.tmp # Temporary file cteated during atomic file writing;
+│   └── users.json # Users datastore file
+├── models
+│   └── user.ts # Users datastore model
 └── index.ts # Database initialization and datastore exporting (optional; datastores can be created and exported anywhere)
 ```
 
