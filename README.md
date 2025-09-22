@@ -1,131 +1,175 @@
-# 📦 @neisanworks/neisandb
+# @neisanworks/neisandb
 
 > A lightweight, model-driven, file-backed database for TypeScript powered by Zod — perfect for CLIs, small apps, prototyping, and Bun/Node projects.
 
 ---
 
-## 🧠 Why use `neisandb`?
+## Features
 
-- ✅ **Zod-powered schemas** for runtime + compile-time validation  
-- ✅ **Model-based classes** with full intellisense  
-- ✅ **Persistent** `.json` file storage  
-- ✅ **Fast prototyping** for local data  
-- ✅ **Tiny footprint**, no runtime dependencies (just Zod)  
-- ✅ Works with **Bun**, **Node.js**, and **TypeScript**
-
----
-
-## ✨ Features
-
-- 📁 File-backed JSON databases (`./my-folder/collection.json`)
-- 🧪 Strongly typed document models
-- 🔎 Simple `find()` and `create()` queries
-- 💥 Zod validation built-in
-- 🧩 Extendable with your own methods (e.g., `authenticate()`)
+- File-based JSON storage with atomic writes and directory syncing
+- Zod-powered schemas for strict runtime validation and type inference
+- Custom model classes with methods, virtual getters, and schema enforcement
+- Deep partial `.findOne()`, `.find()` querying via object shape or functional filters
+- Schema-level uniqueness enforcement across one or more fields
+- Atomic `.create()`, `.save()`, `.delete()` operations with rollback on failure
+- Automatic file creation and folder setup if not present
+- Built-in error handling via consistent return types: MethodSuccess or MethodFailure
+- Automatic ID management for records
+- Extensible architecture (new collections/models are easy to add)
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Install
+
 ```bash
-bun add neisandb zod
+bun add @neisanworks/neisandb zod
 # or
-npm install neisandb zod
+npm install @neisanworks/neisandb zod
 ```
+
 ### 2. Define a Schema and Model
+
 ```ts
-
 // user.ts
-import { z } from "zod";
-import { type DBModelProperties } from "neisandb/types";
+import { CollectionModel, type DBModelProperties } from "@neisanworks/neisandb";
+import z from "zod/v4"
 
-export const UserSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
-  attempts: z.number(),
+const UserSchema = z.object({
+    email: z.string(),
+    password: z.string(),
+    attempts: z.number().default(0)
 });
+type UserSchema = typeof UserSchema;
 
-export type UserSchema = typeof UserSchema;
+class UserModel
+extends CollectionModel<UserSchema> // Allows for the `json()` method, which validates the data before returning JSON
+implements DBModelProperties<UserSchema> // Ensures the model's properties and types are aligned; Not required, but helpful
+{
+    id: number;
+    email: string;
+    password: string;
+    attempts: number;
 
-export class UserModel implements DBModelProperties<UserSchema> {
-  id: number;
-  email: string;
-  password: string;
-  attempts: number;
+    constructor(data: z.infer<UserSchema>, id: number) {
+        super(UserSchema);
+        this.id = id;
+        this.email = data.email;
+        this.password = data.password;
+        this.attempts = data.attempts;
+    }
 
-  constructor(data: z.infer<UserSchema>, id: number) {
-    this.id = id;
-    this.email = data.email;
-    this.password = data.password;
-    this.attempts = data.attempts;
-  }
+    @property // Virtual properties can be created and used when a record is returned from the datastore
+    locked(): boolean {
+      return this.attempts >= 3
+    }
 
-  authenticate(password: string) {
-    return this.password === password;
-  }
+    // Methods can be attached to the model and used upon return of a record
+    authenticate(password: string): boolean {
+        return this.password === password;
+    }
 }
 ```
-### 3.Initiate the Database
+
+### 3. Initiate the Database
+
 ```ts
-// main.ts
-import { Database } from "neisandb/database";
-import { UserSchema, UserModel } from "./user";
+// index.ts
+import { Database } from "@neisanworks/neisandb";
+import { UserSchema, UserModel } from "./models/user";
 
 const db = new Database({ folder: "./data", autoload: true });
 
 const Users = db.collection({
-  name: "users",
-  schema: UserSchema,
-  model: UserModel,
+    name: "users",
+    schema: UserSchema,
+    model: UserModel,
+    uniques: ['email'] // Ensures that no two users have the same email address
 });
 ```
+
 ### 4. Use the Database
+
 ```ts
-// Create a user
-const result = Users.create({
-  email: "test@example.com",
-  password: "hunter2",
-  attempts: 0,
+// Create a user, receiving MethodFailure or MethodReturn with the model as `createdUser.data`
+const createUser = Users.create({
+    email: "test@example.com",
+    password: "hunter2",
+    attempts: 0
 });
 
-if (result.success) {
-  const user = result.data;
-  console.log("User created:", user.email);
+if (createUser.success) {
+    const user = createUser.data;
+    console.log("User created:", user.email);
 }
 
 // Find a user
-const found = Users.find({ email: "test@example.com" }, 1);
+const user = Users.findOne({ email: "test@example.com" };
 if (found) {
-  const user = found;
-  console.log("Auth success?", user.authenticate("hunter2"));
+    console.log("Auth success?", user.authenticate("hunter2"));
 }
 ```
 
-## 📂 Output Files
-Each collection is stored in its own .json file under your folder path:
+---
+
+## Output Files
+
+Each collection is stored in its own .json file under your folder path, using atomic writing to ensure data remains uncorrupted:
+
 ```bash
-/data/
-└── users.json
+/neisandb/
+└── /data/
+|   └── users-${Date.now()}-${Math.random()}.tmp # Temporary file cteated during atomic file writing;
+|   └── users.json # Users datastore file
+└── /models/
+|   └── user.ts # Users datastore model
+└── index.ts # Database initialization and datastore exporting (optional; datastores can be created and exported anywhere)
 ```
+
 Example:
+
 ```json
 {
-  "0": {
-    "email": "test@example.com",
-    "password": "hunter2",
-    "attempts": 0
-  }
+    "0": {
+        "email": "test@example.com",
+        "password": "hunter2",
+        "attempts": 0
+    }
 }
 ```
-## 📐 Types Overview
-| Type                     | Description                         |
-| ------------------------ | ----------------------------------- |
-| `DatabaseClass`          | Main DB instance                    |
-| `DatastoreClass`         | Collection instance                 |
-| `DBModel<Schema, Model>` | Constructor signature for models    |
-| `MethodResult<T>`        | Result type for safe actions        |
-| `Prettier<T>`            | Utility to flatten & preserve types |
-## 📜 License
-MIT — © 2025 neisanworks
 
+---
+
+## Types Overview
+
+### 1. Type Inference & Validation
+- Full Zod schema integration with `z.core.input<Schema>` and `z.core.output<Schema>` types
+- Strongly typed model creation and updates
+- `CollectionModel` ensures that instances are always schema-valid
+
+### 2. Return-Type Safety
+- Explicit method result types via:
+  - `MethodReturn<T> | MethodSuccess` – for successful operations
+  - `MethodFailure<T>` – for failed operations with structured error messages
+- Prevents reliance on exceptions; encourages predictable control flow
+
+### 3. Deep Partial Matching
+- `DeepPartial<T>` allows for recursive partial filtering in `.find()` and `.findOne()`
+- `PartialSchema<Schema>` enables safe, schema-aware deep filters
+
+### 4. Flexible querying
+- `FilterLookup<Schema>` allows functional queries:
+```ts
+Users.find(({ doc }) => doc.email.includes('@example.com'))
+```
+
+### 5. Model Abstraction
+- `DBModel<Schema, Model>` and `DBModelProperties<Schema>` link raw schema types to full class-based models
+- Enables OOP-style behavior with typed `id` property baked in
+
+---
+
+## 📜 License
+
+MIT — © 2025 neisanworks

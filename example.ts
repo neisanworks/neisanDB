@@ -1,5 +1,5 @@
 import z from "zod";
-import { Database } from "./src/neisandb/database.js";
+import { CollectionModel, Database } from "./src/neisandb/database.js";
 import type { DBModelProperties } from "./src/types.js";
 
 const db = new Database({ autoload: true });
@@ -11,13 +11,14 @@ const UserSchema = z.object({
 });
 type UserSchema = typeof UserSchema;
 
-class UserModel implements DBModelProperties<UserSchema> {
+class UserModel extends CollectionModel<UserSchema> implements DBModelProperties<UserSchema> {
     id: number;
     email: string;
     password: string;
     attempts: number;
 
     constructor(data: z.infer<UserSchema>, id: number) {
+        super(UserSchema);
         this.id = id;
         this.email = data.email;
         this.password = data.password;
@@ -62,7 +63,7 @@ const users = Users.find(({ doc }) => doc.email === "admin@gmail.com");
 console.log(users);
 
 if (users && users.length > 0) {
-    users.forEach((user) => Users.delete(user))
+    users.forEach((user) => Users.delete(user));
 }
 
 Users.findAndDelete(({ doc }) => doc.email === "admin@gmail.com");
