@@ -131,7 +131,7 @@ Example:
 
 ```json
 {
-    "0": {
+    "1": {
         "email": "test@example.com",
         "password": "hunter2",
         "attempts": 0
