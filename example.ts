@@ -12,14 +12,12 @@ const UserSchema = z.object({
 type UserSchema = typeof UserSchema;
 
 class UserModel extends CollectionModel<UserSchema> implements DBModelProperties<UserSchema> {
-    id: number;
     email: string;
     password: string;
     attempts: number;
 
     constructor(data: z.infer<UserSchema>, id: number) {
-        super(UserSchema);
-        this.id = id;
+        super(UserSchema, id);
         this.email = data.email;
         this.password = data.password;
         this.attempts = data.attempts;
@@ -34,7 +32,8 @@ const Users = db.collection({
     name: "users",
     schema: UserSchema,
     model: UserModel,
-    uniques: ["email"]
+    uniques: ["email"],
+    indexes: ["email"]
 });
 const createAdmin = Users.create({
     email: "admin@gmail.com",
@@ -45,7 +44,7 @@ if (!createAdmin.success) {
     console.log(createAdmin.errors);
 } else {
     const admin = createAdmin.data;
-    console.log(Users.findOne(admin.id));
+    console.log(Users.findOne(admin.id)?.json);
 }
 
 const createUser = Users.create({
@@ -56,14 +55,8 @@ if (!createUser.success) {
     console.log(createUser.errors);
 } else {
     const user = createUser.data;
-    console.log(Users.find({ email: user.email }));
+    console.log(Users.find({ email: user.email })?.map((user) => user.json));
 }
 
 const users = Users.find(({ doc }) => doc.email === "admin@gmail.com");
-console.log(users);
-
-if (users && users.length > 0) {
-    users.forEach((user) => Users.delete(user));
-}
-
-Users.findAndDelete(({ doc }) => doc.email === "admin@gmail.com");
+console.log(users?.map((user) => user.json));

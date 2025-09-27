@@ -19,7 +19,8 @@ import type {
     PartialSchema,
     FilterLookup,
     SchemaErrors,
-    MethodReturn
+    MethodReturn,
+    Prettier
 } from "../types.js";
 import { deepMatch, ensureDir, ensureFile, isPartialLookup } from "../utils.js";
 
@@ -633,13 +634,15 @@ class Datastore<
 }
 
 export abstract class CollectionModel<Schema extends z.ZodObject> {
+    id: number;
     schema: Schema;
 
-    constructor(schema: Schema) {
+    constructor(schema: Schema, id: number) {
+        this.id = id;
         this.schema = schema;
     }
 
-    get json(): z.core.output<Schema> {
+    get json(): Prettier<{ id: number } & z.core.output<Schema>> {
         const parsed = this.schema.safeParse(this);
         if (!parsed.success) {
             const errors: SchemaErrors<Schema> = {};
@@ -649,6 +652,9 @@ export abstract class CollectionModel<Schema extends z.ZodObject> {
             );
             throw new Error(JSON.stringify(errors));
         }
-        return parsed.data;
+        return {
+            id: this.id,
+            ...parsed.data
+        };
     }
 }

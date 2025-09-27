@@ -48,14 +48,12 @@ class UserModel
 extends CollectionModel<UserSchema> // Allows for the `json()` method, which validates the data before returning JSON
 implements DBModelProperties<UserSchema> // Ensures the model's properties and types are aligned; Not required, but helpful
 {
-    id: number;
     email: string;
     password: string;
     attempts: number;
 
     constructor(data: z.infer<UserSchema>, id: number) {
-        super(UserSchema);
-        this.id = id;
+        super(UserSchema, id);
         this.email = data.email;
         this.password = data.password;
         this.attempts = data.attempts;
