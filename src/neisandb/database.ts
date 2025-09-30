@@ -633,7 +633,7 @@ class Datastore<
                     })
                 )
             );
-            return results.length > 0 ? results : undefined;
+            return results.length > 0 ? results.filter((result) => !!result) : undefined;
         };
 
         if (isModelMatch(arg_1, this.model)) {
