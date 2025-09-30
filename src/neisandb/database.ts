@@ -240,6 +240,128 @@ class Datastore<
         return { success: false, errors };
     }
 
+    existsSync(id: number): boolean;
+    existsSync(params: PartialSchema<Schema>): boolean;
+    existsSync(predicate: SyncSchemaPredicate<Schema>): boolean;
+    existsSync(lookup: number | SyncLookup<Schema>): boolean {
+        if (!this.ready) return false;
+
+        if (typeof lookup === "number") {
+            return this.data.has(lookup);
+        }
+
+        let exists: boolean = false;
+        const checkExistence = (ids: Iterable<number>) => {
+            Array.from(ids).forEach((id) => {
+                if (exists) return;
+
+                const record = this.data.get(id);
+                if (!record) return;
+
+                if (typeof lookup === "function") {
+                    exists = lookup(record, id);
+                } else {
+                    exists = deepMatch(record, lookup);
+                }
+            });
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const key of indexed) {
+                    const valueIDMap = this.index.get(key)!;
+                    const ids = valueIDMap.get(lookup[key]);
+                    if (!ids) return false;
+
+                    if (this.uniques.has(key)) {
+                        checkExistence(ids);
+                        return exists;
+                    }
+
+                    checkExistence(ids);
+                    if (!exists) continue;
+
+                    return exists;
+                }
+            }
+        }
+
+        checkExistence(this.data.keys());
+        return exists;
+    }
+
+    async exists(id: number): Promise<boolean>;
+    async exists(params: PartialSchema<Schema>): Promise<boolean>;
+    async exists(predicate: SchemaPredicate<Schema>): Promise<boolean>;
+    async exists(lookup: number | Lookup<Schema>): Promise<boolean> {
+        if (!this.ready) return false;
+
+        if (typeof lookup === "number") {
+            return this.data.has(lookup);
+        }
+
+        let exists = false;
+        const checkExistence = async (ids: Iterable<number>) => {
+            await Promise.all(
+                Array.from(ids).map((id) =>
+                    this.limiter(async () => {
+                        if (exists) return;
+
+                        return this.lock(id).runExclusive(async () => {
+                            if (exists) return;
+
+                            const record = this.data.get(id);
+                            if (!record) return;
+
+                            if (typeof lookup === "function") {
+                                exists = isSync(lookup)
+                                    ? lookup(record, id)
+                                    : await lookup(record, id);
+                            } else {
+                                exists = deepMatch(record, lookup);
+                            }
+                        });
+                    })
+                )
+            );
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const key of indexed) {
+                    const valueIDMap = this.index.get(key)!;
+                    const ids = valueIDMap.get(lookup[key]);
+                    if (!ids) return false;
+
+                    if (this.uniques.has(key)) {
+                        await checkExistence(ids);
+                        return exists;
+                    }
+
+                    await checkExistence(ids);
+                    if (!exists) continue;
+
+                    return exists;
+                }
+            }
+        }
+
+        await checkExistence(this.data.keys());
+        return exists;
+    }
+
     findOneSync(id: number): Model | undefined;
     findOneSync(params: PartialSchema<Schema>): Model | undefined;
     findOneSync(predicate: SyncSchemaPredicate<Schema>): Model | undefined;
