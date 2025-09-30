@@ -625,15 +625,19 @@ class Datastore<
             await Promise.all(
                 models.map((model) =>
                     this.limitConcurrency(async () => {
+                        let result: T | undefined = undefined;
+
                         if (isAsync(mapper)) {
-                            results.push(await mapper(model));
+                            result = await mapper(model);
                         } else if (isSync(mapper)) {
-                            results.push(mapper(model));
+                            result = mapper(model);
                         }
+
+                        if (result) results.push(result);
                     })
                 )
             );
-            return results.length > 0 ? results.filter((result) => !!result) : undefined;
+            return results.length > 0 ? results : undefined;
         };
 
         if (isModelMatch(arg_1, this.model)) {
