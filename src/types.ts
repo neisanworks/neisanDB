@@ -53,8 +53,15 @@ export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.outpu
 export type SchemaPredicate<Schema extends z.ZodObject> = (
     record: z.core.output<Schema>,
     id: number
+) => boolean | Promise<boolean>;
+export type SyncSchemaPredicate<Schema extends z.ZodObject> = (
+    record: z.core.output<Schema>,
+    id: number
 ) => boolean;
 export type Lookup<Schema extends z.ZodObject> = PartialSchema<Schema> | SchemaPredicate<Schema>;
+export type SyncLookup<Schema extends z.ZodObject> =
+    | PartialSchema<Schema>
+    | SyncSchemaPredicate<Schema>;
 export type RecordUpdate<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> =
     | PartialSchema<Schema>
     | ((model: Model) => Model);

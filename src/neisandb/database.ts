@@ -21,7 +21,9 @@ import type {
     RecordUpdate,
     SchemaErrors,
     SchemaKey,
-    SchemaPredicate
+    SchemaPredicate,
+    SyncLookup,
+    SyncSchemaPredicate
 } from "../types.js";
 import {
     deepMatch,
@@ -238,8 +240,8 @@ class Datastore<
 
     findOneSync(id: number): Model | undefined;
     findOneSync(params: PartialSchema<Schema>): Model | undefined;
-    findOneSync(filter: SchemaPredicate<Schema>): Model | undefined;
-    findOneSync(lookup: number | Lookup<Schema>): Model | undefined {
+    findOneSync(predicate: SyncSchemaPredicate<Schema>): Model | undefined;
+    findOneSync(lookup: number | SyncLookup<Schema>): Model | undefined {
         if (!this.ready) return;
 
         if (typeof lookup === "number") {
@@ -294,7 +296,7 @@ class Datastore<
 
     async findOne(id: number): Promise<Model | undefined>;
     async findOne(params: PartialSchema<Schema>): Promise<Model | undefined>;
-    async findOne(filter: SchemaPredicate<Schema>): Promise<Model | undefined>;
+    async findOne(predicate: SchemaPredicate<Schema>): Promise<Model | undefined>;
     async findOne(lookup: number | Lookup<Schema>): Promise<Model | undefined> {
         if (!this.ready) return;
 
@@ -319,7 +321,9 @@ class Datastore<
                             if (!record) return;
 
                             if (
-                                (typeof lookup === "function" && lookup(record, id)) ||
+                                (typeof lookup === "function" &&
+                                    ((isAsync(lookup) && (await lookup(record, id))) ||
+                                        (isSync(lookup) && lookup(record, id)))) ||
                                 deepMatch(record, lookup)
                             ) {
                                 model = new this.model(record, id);
@@ -453,9 +457,9 @@ class Datastore<
     findSync(): Array<Model> | undefined;
     findSync(params: PartialSchema<Schema>): Array<Model> | undefined;
     findSync(params: PartialSchema<Schema>, limit: number): Array<Model> | undefined;
-    findSync(filter: SchemaPredicate<Schema>): Array<Model> | undefined;
-    findSync(filter: SchemaPredicate<Schema>, limit: number): Array<Model> | undefined;
-    findSync(lookup?: Lookup<Schema>, limit?: number): Array<Model> | undefined {
+    findSync(predicate: SyncSchemaPredicate<Schema>): Array<Model> | undefined;
+    findSync(predicate: SyncSchemaPredicate<Schema>, limit: number): Array<Model> | undefined;
+    findSync(lookup?: SyncLookup<Schema>, limit?: number): Array<Model> | undefined {
         if (!this.ready) return;
 
         if (!lookup) {
@@ -515,8 +519,11 @@ class Datastore<
     async find(): Promise<Array<Model> | undefined>;
     async find(params: PartialSchema<Schema>): Promise<Array<Model> | undefined>;
     async find(params: PartialSchema<Schema>, limit: number): Promise<Array<Model> | undefined>;
-    async find(filter: SchemaPredicate<Schema>): Promise<Array<Model> | undefined>;
-    async find(filter: SchemaPredicate<Schema>, limit: number): Promise<Array<Model> | undefined>;
+    async find(predicate: SchemaPredicate<Schema>): Promise<Array<Model> | undefined>;
+    async find(
+        predicate: SchemaPredicate<Schema>,
+        limit: number
+    ): Promise<Array<Model> | undefined>;
     async find(lookup?: Lookup<Schema>, limit?: number): Promise<Array<Model> | undefined> {
         if (!this.ready) return;
 
@@ -537,7 +544,10 @@ class Datastore<
                             if (!lookup) {
                                 models.push(new this.model(record, id));
                             } else if (typeof lookup === "function") {
-                                if (lookup(record, id)) {
+                                if (
+                                    (isAsync(lookup) && (await lookup(record, id))) ||
+                                    (isSync(lookup) && lookup(record, id))
+                                ) {
                                     models.push(new this.model(record, id));
                                 }
                             } else if (deepMatch(record, lookup)) {
@@ -645,7 +655,7 @@ class Datastore<
         MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
     >;
     async findAndUpdate(
-        filter: SchemaPredicate<Schema>,
+        predicate: SchemaPredicate<Schema>,
         update: RecordUpdate<Schema, Model>
     ): Promise<
         MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
@@ -692,7 +702,11 @@ class Datastore<
 
                             const isMatch: boolean = isPartialLookup(lookup, this.schema)
                                 ? deepMatch(record, lookup)
-                                : lookup(record, id);
+                                : isAsync(lookup)
+                                  ? await lookup(record, id)
+                                  : isSync(lookup)
+                                    ? lookup(record, id)
+                                    : false;
                             if (!isMatch) return;
 
                             if (typeof update === "function") {
@@ -833,7 +847,11 @@ class Datastore<
 
                             const isMatch: boolean = isPartialLookup(lookup, this.schema)
                                 ? deepMatch(record, lookup)
-                                : lookup(record, id);
+                                : isAsync(lookup)
+                                  ? await lookup(record, id)
+                                  : isSync(lookup)
+                                    ? lookup(record, id)
+                                    : false;
                             if (!isMatch) return;
 
                             cache.set(id, record);
