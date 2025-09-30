@@ -45,7 +45,7 @@ const UserSchema = z.object({
 type UserSchema = typeof UserSchema;
 
 class UserModel
-extends CollectionModel<UserSchema> // Allows for the `json()` method, which validates the data before returning JSON
+extends CollectionModel<UserSchema> // Handles `id` property and allows for the `json()` method, which validates the data before returning JSON
 implements DBModelProperties<UserSchema> // Ensures the model's properties and types are aligned; Not required, but helpful
 {
     email: string;

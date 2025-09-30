@@ -35,28 +35,3 @@ const Users = db.collection({
     uniques: ["email"],
     indexes: ["email"]
 });
-const createAdmin = Users.create({
-    email: "admin@gmail.com",
-    password: "adminPassword"
-});
-
-if (!createAdmin.success) {
-    console.log(createAdmin.errors);
-} else {
-    const admin = createAdmin.data;
-    console.log(Users.findOne(admin.id)?.json);
-}
-
-const createUser = Users.create({
-    email: "user@gmail.com",
-    password: "userPassword"
-});
-if (!createUser.success) {
-    console.log(createUser.errors);
-} else {
-    const user = createUser.data;
-    console.log(Users.find({ email: user.email })?.map((user) => user.json));
-}
-
-const users = Users.find(({ doc }) => doc.email === "admin@gmail.com");
-console.log(users?.map((user) => user.json));

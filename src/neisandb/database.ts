@@ -1,26 +1,26 @@
-import {
-    closeSync,
-    fsyncSync,
-    openSync,
-    readFileSync,
-    renameSync,
-    writeFileSync,
-    writeSync
-} from "fs";
+import { Mutex } from "async-mutex";
+import { closeSync, openSync, readFileSync } from "fs";
+import { open, rename } from "fs/promises";
+import pLimit, { type LimitFunction } from "p-limit";
 import { dirname, join } from "path";
-import z from "zod";
+import z from "zod/v4";
 import type {
-    DBOptions,
-    DBModelProperties,
-    DSOptions,
     DBModel,
+    DBModelProperties,
+    DBOptions,
+    Doc,
+    DocWithID,
+    DSOptions,
+    Lookup,
     MethodFailure,
-    MethodSuccess,
-    PartialSchema,
-    FilterLookup,
-    SchemaErrors,
     MethodReturn,
-    Prettier
+    MethodSuccess,
+    ParseFailure,
+    PartialSchema,
+    RecordUpdate,
+    SchemaErrors,
+    SchemaKey,
+    SchemaPredicate
 } from "../types.js";
 import { deepMatch, ensureDir, ensureFile, isPartialLookup } from "../utils.js";
 
@@ -47,90 +47,31 @@ class Datastore<
     Schema extends z.ZodObject<Shape>,
     Model extends DBModelProperties<Schema>
 > {
-    private data: Record<number, z.core.output<Schema>> = {};
+    private lastID: number = 0;
+    private data = new Map<number, Doc<Schema>>();
+    private locks = new Map<number, { mutex: Mutex; lastUsed: Date }>();
 
     readonly name: string;
     readonly path: string;
     readonly autoload: boolean;
+    readonly limitConcurrency: LimitFunction;
 
     readonly schema: Schema;
     readonly shape: Shape;
     readonly model: DBModel<Schema, Model>;
 
-    readonly uniques: Array<keyof z.core.output<Schema>>;
-    private readonly indexes: Array<keyof z.core.output<Schema>>;
-    private index = new Map<keyof z.core.output<Schema>, Map<any, Array<number>>>();
+    readonly uniques: Set<SchemaKey<Schema>>;
+    readonly indexes: Set<SchemaKey<Schema>>;
 
-    private read(): MethodFailure | MethodSuccess {
-        try {
-            this.data = JSON.parse(readFileSync(this.path, { encoding: "utf-8" }) ?? "{}");
-            this.buildIndex();
-            return { success: true };
-        } catch {
-            return {
-                success: false,
-                errors: { general: `Failed to read datastore file: ${this.path}` }
-            };
-        }
-    }
+    private readonly index = new Map<SchemaKey<Schema>, Map<any, Set<number>>>();
 
-    private buildIndex(): void {
-        this.index.clear();
-
-        this.indexes.forEach((key) => {
-            const map = new Map<any, Array<number>>();
-            Object.entries(this.data).forEach(([id, doc]) => {
-                const value = doc[key];
-                map.set(value, [...(map.get(value) ?? []), Number(id)]);
-            });
-
-            this.index.set(key, map);
-        });
-    }
-
-    private write(): MethodFailure | MethodSuccess {
-        const folder = dirname(this.path);
-        const temppath = join(folder, `${this.name}.${Date.now()}-${Math.random()}.tmp`);
-        const file = openSync(temppath, "w");
-
-        try {
-            writeSync(file, JSON.stringify(this.data, null, 2));
-            fsyncSync(file);
-        } catch {
-            return { success: false, errors: { general: "Failed to write datastore file" } };
-        } finally {
-            closeSync(file);
-        }
-
-        renameSync(temppath, this.path);
-
-        const directory = openSync(folder, "r");
-        try {
-            fsyncSync(directory);
-        } catch {
-            return { success: false, errors: { general: "Failed to sync directory" } };
-        } finally {
-            closeSync(directory);
-        }
-
-        this.buildIndex();
-
-        return { success: true };
-    }
-
-    private limited(
-        results: Array<[string, z.core.output<Schema>]>,
-        limit?: number
-    ): Array<Model> | undefined {
-        const limited = limit && results.length > limit ? results.slice(0, limit) : results;
-        if (limited.length === 0) return;
-
-        return limited.map(([id, record]) => new this.model(record, Number(id)));
+    private get dataString(): string {
+        return JSON.stringify(Object.fromEntries(this.data), null, 2);
     }
 
     private get ready(): boolean {
-        if (Object.keys(this.data).length === 0) {
-            const read = this.read();
+        if (this.data.size === 0) {
+            const read = this.readSync();
             if (!read.success) return false;
         }
 
@@ -138,81 +79,216 @@ class Datastore<
     }
 
     private get nextID(): number {
-        if (!this.ready) return 0;
-
-        const ids = Object.keys(this.data).map(Number);
-        return ids.length ? Math.max(...ids) + 1 : 1;
-    }
-
-    load() {
-        this.read();
-        return this.ready;
+        return this.lastID++;
     }
 
     constructor(database: Database, params: DSOptions<Schema, Model>) {
         this.name = params.name;
         this.path = ensureFile(join(database.folder, `${this.name}.json`), JSON.stringify({}));
         this.autoload = params.autoload ?? database.autoload;
-
+        this.limitConcurrency = pLimit(params.concurrencyLimit ?? 10);
         this.schema = params.schema;
-        this.shape = this.schema.shape;
+        this.shape = params.schema.shape;
         this.model = params.model;
-
-        this.uniques = params.uniques ?? [];
-        this.indexes = params.indexes ?? [];
+        this.uniques = new Set(params.uniques);
+        this.indexes = new Set(params.indexes);
 
         if (this.autoload) this.read();
+
+        setInterval(() => {
+            if (this.locks.size === 0) return;
+
+            this.locks.forEach(({ mutex, lastUsed }, id) => {
+                if (lastUsed.getTime() + 1000 * 60 * 5 > Date.now() && !mutex.isLocked()) {
+                    this.locks.delete(id);
+                }
+            });
+        }, 1000 * 60);
     }
 
-    findOne(id: number): Model | undefined;
-    findOne(params: PartialSchema<Schema>): Model | undefined;
-    findOne(filter: FilterLookup<Schema>): Model | undefined;
-    findOne(lookup: number | PartialSchema<Schema> | FilterLookup<Schema>): Model | undefined {
+    private readSync(): MethodFailure | MethodSuccess {
+        const file = openSync(this.path, "r");
+        try {
+            const dataString = readFileSync(file, { encoding: "utf-8" });
+            this.setData(JSON.parse(dataString));
+            this.lastID = Math.max(...this.data.keys(), 0);
+            return { success: true };
+        } catch (error: any) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { success: false, errors: { general: message } };
+        } finally {
+            closeSync(file);
+        }
+    }
+
+    private async read(): Promise<MethodFailure | MethodSuccess> {
+        const file = await open(this.path, "r");
+        try {
+            const dataString = await file.readFile({ encoding: "utf-8" });
+            this.setData(JSON.parse(dataString));
+            this.lastID = Math.max(...this.data.keys(), 0);
+            return { success: true };
+        } catch (error: any) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { success: false, errors: { general: message } };
+        } finally {
+            await file.close();
+        }
+    }
+
+    private setData(data: unknown) {
+        const parsed = data && typeof data === "object" ? data : {};
+        Object.entries(parsed).forEach(([id, record]) =>
+            this.data.set(Number(id), record as Doc<Schema>)
+        );
+        this.reindex();
+    }
+
+    private reindex(): void {
+        this.index.clear();
+
+        this.indexes.forEach((key) => {
+            const map = new Map<any, Set<number>>();
+            this.data.forEach((record, id) => {
+                const value = record[key];
+                if (!map.has(value)) {
+                    map.set(value, new Set([id]));
+                } else {
+                    map.get(value)?.add(id);
+                }
+            });
+
+            this.index.set(key, map);
+        });
+    }
+
+    private async write(): Promise<MethodFailure | MethodSuccess> {
+        const folder = dirname(this.path);
+        const temppath = join(folder, `${this.name}.${Date.now()}-${Math.random()}.tmp`);
+
+        const tempfile = await open(temppath, "w");
+        try {
+            await tempfile.writeFile(this.dataString);
+            await tempfile.sync();
+        } catch (error: any) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { success: false, errors: { general: message } };
+        } finally {
+            await tempfile.close();
+        }
+
+        try {
+            await rename(temppath, this.path);
+        } catch (error: any) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { success: false, errors: { general: message } };
+        }
+
+        const directory = await open(folder, "r");
+        try {
+            await directory.sync();
+        } catch (error: any) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { success: false, errors: { general: message } };
+        } finally {
+            await directory.close();
+        }
+
+        this.reindex();
+        return { success: true };
+    }
+
+    private lock(id: number): Mutex {
+        if (!this.locks.has(id)) {
+            this.locks.set(id, { mutex: new Mutex(), lastUsed: new Date() });
+        }
+
+        const mutex = this.locks.get(id)!;
+        mutex.lastUsed = new Date();
+        this.locks.set(id, mutex);
+
+        return this.locks.get(id)!.mutex;
+    }
+
+    loadSync(): MethodFailure | MethodSuccess {
+        return this.readSync();
+    }
+
+    async load(): Promise<MethodFailure | MethodSuccess> {
+        return await this.read();
+    }
+
+    private schemaErrorFailure(parsed: ParseFailure<Schema>): MethodFailure<SchemaErrors<Schema>> {
+        const errors: SchemaErrors<Schema> = {};
+        z.treeifyError(parsed.error, (issue) => {
+            const path = issue.path.at(0);
+            if (path) errors[path as SchemaKey<Schema>] = issue.message;
+        });
+        return { success: false, errors };
+    }
+
+    findOneSync(id: number): Model | undefined;
+    findOneSync(params: PartialSchema<Schema>): Model | undefined;
+    findOneSync(filter: SchemaPredicate<Schema>): Model | undefined;
+    findOneSync(lookup: number | Lookup<Schema>): Model | undefined {
         if (!this.ready) return;
 
         if (typeof lookup === "number") {
-            const record = this.data[lookup];
+            const record = this.data.get(lookup);
             return record ? new this.model(record, lookup) : undefined;
         }
 
-        if (isPartialLookup(lookup, this.schema)) {
-            for (const key of this.index.keys()) {
-                if (!Object.hasOwn(lookup, key)) continue;
+        const matchedRecord = (ids: Iterable<number>) => {
+            for (const id of ids) {
+                const record = this.data.get(id);
+                if (!record) continue;
 
-                const value = lookup[key];
-                const matchedIDs = this.index.get(key)!.get(value);
-                if (!matchedIDs) continue;
-
-                for (const id of matchedIDs) {
-                    const record = this.data[id];
-                    if (!record) continue;
-
-                    if (this.uniques.includes(key)) {
-                        return new this.model(record, id);
-                    }
-
+                if (typeof lookup === "function") {
+                    const matches = lookup(record, id);
+                    if (matches) return new this.model(record, id);
+                } else {
                     const matches = Object.entries(lookup).every(
                         ([k, v]) => record[k as keyof typeof lookup] === v
                     );
                     if (matches) return new this.model(record, id);
                 }
             }
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const key of indexed) {
+                    const valueIDMap = this.index.get(key)!;
+                    const ids = valueIDMap.get(lookup[key]);
+                    if (!ids) continue;
+
+                    if (this.uniques.has(key)) {
+                        return matchedRecord(ids);
+                    }
+
+                    const matched = matchedRecord(ids);
+                    if (!matched) continue;
+
+                    return matched;
+                }
+            }
         }
 
-        const results = Object.entries(this.data).filter(([id, doc]) => {
-            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
-
-            return deepMatch(doc, lookup);
-        });
-        const match = results.at(0);
-
-        return match ? new this.model(match[1], Number(match[0])) : undefined;
+        return matchedRecord(this.data.keys());
     }
 
-    findOneAndUpdate(
+    async findOneAndUpdate(
         id: number,
-        update: PartialSchema<Schema>
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
+        update: RecordUpdate<Schema, Model>
+    ): Promise<
+        MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model>
+    > {
         if (!this.ready) {
             return {
                 success: false,
@@ -220,32 +296,56 @@ class Datastore<
             };
         }
 
-        if (!this.data[id]) {
-            return { success: false, errors: { general: "Document Not Found" } };
-        }
+        const writeUpdate = async (
+            id: number,
+            update: Doc<Schema>,
+            fallback: Doc<Schema>
+        ): Promise<MethodFailure | MethodReturn<Model>> => {
+            this.data.set(id, update);
+            const write = await this.write();
+            if (!write.success) {
+                this.data.set(id, fallback);
+                return write;
+            }
 
-        const parse = this.schema.safeParse(update);
-        if (!parse.success) {
-            const errors: SchemaErrors<Schema> = {};
-            z.treeifyError(
-                parse.error,
-                (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
-            );
-            return { success: false, errors };
-        }
+            return { success: true, data: new this.model(update, id) };
+        };
 
-        const cache = this.data;
-        this.data[id] = { ...this.data[id], ...parse.data };
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
+        return this.lock(id).runExclusive(async () => {
+            const record = this.data.get(id);
+            if (!record) {
+                return {
+                    success: false,
+                    errors: { general: `${this.name} with id ${id} not found` }
+                };
+            }
 
-        return { success: true, data: new this.model(this.data[id], id) };
+            if (typeof update === "object") {
+                const parsed = await this.schema.partial().safeParseAsync(update);
+                if (!parsed.success) {
+                    return this.schemaErrorFailure(parsed);
+                }
+
+                const updated: Doc<Schema> = {
+                    ...record,
+                    ...parsed.data
+                };
+                return await writeUpdate(id, updated, record);
+            } else {
+                const oldModel = new this.model(record, id);
+                const updatedModel = update(oldModel);
+
+                const parsed = await this.schema.safeParseAsync(updatedModel);
+                if (!parsed.success) {
+                    return this.schemaErrorFailure(parsed);
+                }
+
+                return await writeUpdate(id, parsed.data, record);
+            }
+        });
     }
 
-    findOneAndDelete(id: number): MethodFailure | MethodReturn<Model> {
+    async findOneAndDelete(id: number): Promise<MethodFailure | MethodReturn<Model>> {
         if (!this.ready) {
             return {
                 success: false,
@@ -253,89 +353,188 @@ class Datastore<
             };
         }
 
-        if (!this.data[id]) {
-            return { success: false, errors: { general: "Document Not Found" } };
-        }
+        return this.lock(id).runExclusive(async () => {
+            const record = this.data.get(id);
+            if (!record) {
+                return {
+                    success: false,
+                    errors: { general: `Failed to find ${this.name} with id ${id}` }
+                };
+            }
 
-        const cache = this.data;
-        const data = this.data[id];
-        delete this.data[id];
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
+            this.data.delete(id);
+            const write = await this.write();
+            if (!write.success) {
+                this.data.set(id, record);
+                return write;
+            }
 
-        return { success: true, data: new this.model(data, id) };
+            return { success: true, data: new this.model(record, id) };
+        });
     }
 
-    find(): Array<Model> | undefined;
-    find(params: PartialSchema<Schema>): Array<Model> | undefined;
-    find(params: PartialSchema<Schema>, limit: number): Array<Model> | undefined;
-    find(filter: FilterLookup<Schema>): Array<Model> | undefined;
-    find(filter: FilterLookup<Schema>, limit: number): Array<Model> | undefined;
-    find(
-        lookup?: PartialSchema<Schema> | FilterLookup<Schema>,
-        limit?: number
-    ): Array<Model> | undefined {
+    findSync(): Array<Model> | undefined;
+    findSync(params: PartialSchema<Schema>): Array<Model> | undefined;
+    findSync(params: PartialSchema<Schema>, limit: number): Array<Model> | undefined;
+    findSync(filter: SchemaPredicate<Schema>): Array<Model> | undefined;
+    findSync(filter: SchemaPredicate<Schema>, limit: number): Array<Model> | undefined;
+    findSync(lookup?: Lookup<Schema>, limit?: number): Array<Model> | undefined {
         if (!this.ready) return;
 
         if (!lookup) {
-            return Object.entries(this.data).map(
-                ([id, record]) => new this.model(record, Number(id))
-            );
+            return Array.from(this.data).map(([id, record]) => {
+                return new this.model(record, id);
+            });
         }
 
+        const findMatches = (ids: Iterable<number>): Array<Model> | undefined => {
+            const matches = Array.from(ids)
+                .filter((id) => {
+                    const record = this.data.get(id);
+                    if (!record) return false;
+
+                    if (typeof lookup === "function") {
+                        return lookup(record, id);
+                    } else {
+                        return Object.entries(lookup).every(([k, v]) => {
+                            return record[k as keyof typeof lookup] === v;
+                        });
+                    }
+                })
+                .slice(0, limit)
+                .map((id) => new this.model(this.data.get(id)!, id));
+
+            return matches.length > 0 ? matches : undefined;
+        };
+
         if (isPartialLookup(lookup, this.schema)) {
-            for (const key of this.index.keys()) {
-                if (!Object.hasOwn(lookup, key)) continue;
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.index.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const key of indexed) {
+                    const valueIDMap = this.index.get(key)!;
+                    const ids = valueIDMap.get(lookup[key as SchemaKey<Schema>]);
+                    if (!ids) continue;
 
-                const value = lookup[key];
-                const matchedIDs = this.index.get(key)!.get(value);
-                if (!matchedIDs) continue;
+                    if (this.uniques.has(key)) {
+                        return findMatches(ids);
+                    }
 
-                const matches = matchedIDs
-                    .map((id) => {
-                        const record = this.data[id];
-                        if (!record) return;
+                    const matches = findMatches(ids);
+                    if (!matches) continue;
 
-                        if (this.uniques.includes(key)) {
-                            return [String(id), record] as [string, z.core.output<Schema>];
-                        }
-
-                        const matches = Object.entries(lookup).every(
-                            ([k, v]) => record[k as keyof typeof lookup] === v
-                        );
-                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
-                    })
-                    .filter((item) => item !== undefined);
-
-                if (matches.length > 0) return this.limited(matches);
+                    return matches;
+                }
             }
         }
 
-        const results = Object.entries(this.data).filter(([id, doc]) => {
-            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
-
-            return deepMatch(doc, lookup);
-        });
-        return this.limited(results, limit);
+        return findMatches(this.data.keys());
     }
 
-    findAndUpdate(
+    async find(): Promise<Array<Model> | undefined>;
+    async find(params: PartialSchema<Schema>): Promise<Array<Model> | undefined>;
+    async find(params: PartialSchema<Schema>, limit: number): Promise<Array<Model> | undefined>;
+    async find(filter: SchemaPredicate<Schema>): Promise<Array<Model> | undefined>;
+    async find(filter: SchemaPredicate<Schema>, limit: number): Promise<Array<Model> | undefined>;
+    async find(lookup?: Lookup<Schema>, limit?: number): Promise<Array<Model> | undefined> {
+        if (!this.ready) return;
+
+        const models: Array<Model> = [];
+
+        const concurrentPushMatching = async (iterable: Iterable<number>) => {
+            await Promise.all(
+                Array.from(iterable).map((id) =>
+                    this.limitConcurrency(async () => {
+                        if (limit && models.length >= limit) return;
+
+                        await this.lock(id).runExclusive(async () => {
+                            if (limit && models.length >= limit) return;
+
+                            const record = this.data.get(id);
+                            if (!record) return;
+
+                            if (!lookup) {
+                                models.push(new this.model(record, id));
+                            } else if (typeof lookup === "function") {
+                                if (lookup(record, id)) {
+                                    models.push(new this.model(record, id));
+                                }
+                            } else if (deepMatch(record, lookup)) {
+                                models.push(new this.model(record, id));
+                            }
+                        });
+                    })
+                )
+            );
+        };
+
+        if (!lookup) {
+            await concurrentPushMatching(this.data.keys());
+
+            return models.length > 0 ? models : undefined;
+        }
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const indexKey of indexed) {
+                    const valueMap: Map<any, Set<number>> | undefined = this.index.get(indexKey);
+                    if (!valueMap || valueMap.size === 0) continue;
+
+                    const ids: Set<number> | undefined = valueMap.get(lookup[indexKey]);
+                    if (!ids) continue;
+
+                    if (this.uniques.has(indexKey)) {
+                        await concurrentPushMatching(ids);
+
+                        return models.length > 0 ? models : undefined;
+                    }
+
+                    await concurrentPushMatching(ids);
+
+                    if (models.length === 0) continue;
+
+                    return models.length > 0 ? models : undefined;
+                }
+            }
+
+            await concurrentPushMatching(this.data.keys());
+
+            return models.length > 0 ? models : undefined;
+        }
+
+        await concurrentPushMatching(this.data.keys());
+
+        return models.length > 0 ? models : undefined;
+    }
+
+    async findAndUpdate(
         params: PartialSchema<Schema>,
-        update: PartialSchema<Schema>
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
-    findAndUpdate(
-        filter: FilterLookup<Schema>,
-        update: PartialSchema<Schema>
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
-    findAndUpdate(
-        lookup: PartialSchema<Schema> | FilterLookup<Schema>,
-        update: PartialSchema<Schema>
-    ):
-        | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
-        | MethodReturn<Array<Model>> {
+        update: RecordUpdate<Schema, Model>
+    ): Promise<
+        MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
+    >;
+    async findAndUpdate(
+        filter: SchemaPredicate<Schema>,
+        update: RecordUpdate<Schema, Model>
+    ): Promise<
+        MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
+    >;
+    async findAndUpdate(
+        lookup: Lookup<Schema>,
+        update: RecordUpdate<Schema, Model>
+    ): Promise<
+        MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
+    > {
         if (!this.ready) {
             return {
                 success: false,
@@ -343,234 +542,157 @@ class Datastore<
             };
         }
 
-        const parse = this.schema.safeParse(update);
-        if (!parse.success) {
-            const errors: SchemaErrors<Schema> = {};
-            z.treeifyError(
-                parse.error,
-                (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
+        let partialUpdate: PartialSchema<Schema>;
+        if (typeof update === "object") {
+            const parsed = await this.schema.partial().safeParseAsync(update);
+            if (!parsed.success) {
+                return this.schemaErrorFailure(parsed);
+            }
+
+            partialUpdate = parsed.data as PartialSchema<Schema>;
+        }
+
+        let errors: SchemaErrors<Schema> | undefined = undefined;
+        const cache = new Map<number, Doc<Schema>>();
+
+        const matches: Array<Model> = [];
+
+        const concurrentUpdateMatching = async (iterable: Iterable<number>) => {
+            await Promise.all(
+                Array.from(iterable).map((id) =>
+                    this.limitConcurrency(async () => {
+                        if (errors) return;
+
+                        await this.lock(id).runExclusive(async () => {
+                            if (errors) return;
+
+                            const record = this.data.get(id);
+                            if (!record) return;
+
+                            const isMatch: boolean = isPartialLookup(lookup, this.schema)
+                                ? deepMatch(record, lookup)
+                                : lookup(record, id);
+                            if (!isMatch) return;
+
+                            if (typeof update === "function") {
+                                const oldModel = new this.model(record, id);
+                                const updatedModel = update(oldModel);
+
+                                const parsed = await this.schema.safeParseAsync(updatedModel);
+                                if (!parsed.success) {
+                                    errors = this.schemaErrorFailure(parsed).errors;
+                                    return;
+                                }
+
+                                cache.set(id, record);
+                                this.data.set(id, parsed.data);
+                                matches.push(new this.model(parsed.data, id));
+                            } else {
+                                if (!partialUpdate) {
+                                    const parsed = await this.schema
+                                        .partial()
+                                        .safeParseAsync(update);
+                                    if (!parsed.success) {
+                                        errors = this.schemaErrorFailure(parsed).errors;
+                                        return;
+                                    }
+
+                                    partialUpdate = parsed.data as PartialSchema<Schema>;
+                                }
+
+                                const updatedRecord: Doc<Schema> = {
+                                    ...record,
+                                    ...partialUpdate
+                                };
+
+                                cache.set(id, record);
+                                this.data.set(id, updatedRecord);
+                                matches.push(new this.model(updatedRecord, id));
+                            }
+                        });
+                    })
+                )
             );
-            return { success: false, errors };
-        }
+        };
 
-        if (isPartialLookup(lookup, this.schema)) {
-            for (const key of this.index.keys()) {
-                if (!Object.hasOwn(lookup, key)) continue;
-
-                const value = lookup[key];
-                const matchedIDs = this.index.get(key)!.get(value);
-                if (!matchedIDs) continue;
-
-                const matches = matchedIDs
-                    .map((id) => {
-                        const record = this.data[id];
-                        if (!record) return;
-
-                        if (this.uniques.includes(key)) {
-                            return [String(id), record] as [string, z.core.output<Schema>];
-                        }
-
-                        const matches = Object.entries(lookup).every(
-                            ([k, v]) => record[k as keyof typeof lookup] === v
-                        );
-                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
-                    })
-                    .filter((item) => item !== undefined);
-
-                if (matches.length > 0) {
-                    const cache = this.data;
-                    const updated = matches.map<[id: string, doc: z.infer<Schema>]>(([id, doc]) => [
-                        id,
-                        { ...doc, ...parse.data }
-                    ]);
-                    for (const [id, doc] of updated) {
-                        this.data[Number(id)] = doc;
-                    }
-                    const write = this.write();
-                    if (!write.success) {
-                        this.data = cache;
-                        return write;
-                    }
-
-                    return {
-                        success: true,
-                        data: updated.map(([id, doc]) => new this.model(doc, Number(id)))
-                    };
-                }
-            }
-        }
-
-        const results = Object.entries(this.data).filter(([id, doc]) => {
-            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
-
-            return deepMatch(doc, lookup);
-        });
-
-        const cache = this.data;
-        const updated = results.map<[id: string, doc: z.infer<Schema>]>(([id, doc]) => [
-            id,
-            { ...doc, ...parse.data }
-        ]);
-        for (const [id, doc] of updated) {
-            this.data[Number(id)] = doc;
-        }
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
-
-        return { success: true, data: updated.map(([id, doc]) => new this.model(doc, Number(id))) };
-    }
-
-    findAndDelete(params: PartialSchema<Schema>): MethodFailure | MethodReturn<Array<Model>>;
-    findAndDelete(filter: FilterLookup<Schema>): MethodFailure | MethodReturn<Array<Model>>;
-    findAndDelete(
-        lookup: PartialSchema<Schema> | FilterLookup<Schema>
-    ): MethodFailure | MethodReturn<Array<Model>> {
-        if (!this.ready) {
-            return {
-                success: false,
-                errors: { general: `Failed to read datastore file: ${this.path}` }
-            };
-        }
-
-        if (isPartialLookup(lookup, this.schema)) {
-            for (const key of this.index.keys()) {
-                if (!Object.hasOwn(lookup, key)) continue;
-
-                const value = lookup[key];
-                const matchedIDs = this.index.get(key)!.get(value);
-                if (!matchedIDs) continue;
-
-                const matches = matchedIDs
-                    .map((id) => {
-                        const record = this.data[id];
-                        if (!record) return;
-
-                        if (this.uniques.includes(key)) {
-                            return [String(id), record] as [string, z.core.output<Schema>];
-                        }
-
-                        const matches = Object.entries(lookup).every(
-                            ([k, v]) => record[k as keyof typeof lookup] === v
-                        );
-                        if (matches) return [String(id), record] as [string, z.core.output<Schema>];
-                    })
-                    .filter((item) => item !== undefined);
-
-                if (matches.length > 0) {
-                    const cache = this.data;
-                    for (const [id] of matches) {
-                        delete this.data[Number(id)];
-                    }
-                    const write = this.write();
-                    if (!write.success) {
-                        this.data = cache;
-                        return write;
-                    }
-
-                    return {
-                        success: true,
-                        data: matches.map(([id, doc]) => new this.model(doc, Number(id)))
-                    };
-                }
-            }
-        }
-
-        const results = Object.entries(this.data).filter(([id, doc]) => {
-            if (typeof lookup === "function") return lookup({ id: Number(id), doc });
-
-            return deepMatch(doc, lookup);
-        });
-
-        const cache = this.data;
-        for (const [id] of results) {
-            delete this.data[Number(id)];
-        }
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
-
-        return { success: true, data: results.map(([id, doc]) => new this.model(doc, Number(id))) };
-    }
-
-    create(
-        doc: z.core.input<Schema>
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model>;
-    create(
-        docs: Array<z.core.input<Schema>>
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Array<Model>>;
-    create(
-        docs: z.core.input<Schema> | Array<z.core.input<Schema>>
-    ):
-        | MethodFailure<Record<"general", string> | SchemaErrors<Schema>>
-        | MethodReturn<Model>
-        | MethodReturn<Array<Model>> {
-        if (!this.ready) {
-            return {
-                success: false,
-                errors: { general: `Failed to read datastore file: ${this.path}` }
-            };
-        }
-
-        if (Array.isArray(docs) && docs.length === 0) {
-            return { success: false, errors: { general: "No documents provided" } };
-        }
-
-        const cache = this.data;
-        const created: Array<[number, z.core.output<Schema>]> = [];
-
-        for (const doc of Array.isArray(docs) ? docs : [docs]) {
-            const parse = this.schema.safeParse(doc);
-            if (!parse.success) {
-                const errors: SchemaErrors<Schema> = {};
-                z.treeifyError(
-                    parse.error,
-                    (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
-                );
+        const finalize = async (): Promise<
+            MethodFailure<{ general: string } | SchemaErrors<Schema>> | MethodReturn<Array<Model>>
+        > => {
+            if (errors) {
+                cache.forEach((cache, id) => this.data.set(id, cache));
                 return { success: false, errors };
             }
+            if (matches.length === 0) {
+                return { success: false, errors: { general: "No Document Matches" } };
+            }
 
-            for (const unique of this.uniques) {
-                if (
-                    Object.values(this.data).some((record) => record[unique] === parse.data[unique])
-                ) {
-                    return {
-                        success: false,
-                        errors: { [unique]: "Already in use" } as SchemaErrors<Schema>
-                    };
+            const write = await this.write();
+            if (!write.success) {
+                cache.forEach((cache, id) => this.data.set(id, cache));
+                return write;
+            }
+
+            return { success: true, data: matches };
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const indexKey of indexed) {
+                    const valueMap: Map<any, Set<number>> = this.index.get(indexKey)!;
+                    if (valueMap.size === 0) continue;
+
+                    const ids: Set<number> | undefined = valueMap.get(lookup[indexKey]);
+                    if (!ids) continue;
+
+                    if (this.uniques.has(indexKey)) {
+                        await concurrentUpdateMatching(ids);
+
+                        return await finalize();
+                    }
+
+                    await concurrentUpdateMatching(ids);
+
+                    if (errors) {
+                        cache.forEach((cache, id) => this.data.set(id, cache));
+                        return { success: false, errors };
+                    }
+                    if (matches.length === 0) continue;
+
+                    const write = await this.write();
+                    if (!write.success) {
+                        cache.forEach((cached, id) => this.data.set(id, cached));
+                        return write;
+                    }
+
+                    return { success: true, data: matches };
                 }
             }
 
-            const id = this.nextID;
-            this.data[id] = parse.data;
-            created.push([id, parse.data]);
+            await concurrentUpdateMatching(this.data.keys());
+
+            return await finalize();
         }
 
-        if (created.length === 0) {
-            return { success: false, errors: { general: "Failed to create document" } };
-        }
+        await concurrentUpdateMatching(this.data.keys());
 
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
-
-        const models = created.map(([id, doc]) => new this.model(doc, id));
-        if (Array.isArray(docs)) {
-            return { success: true, data: models };
-        }
-
-        return { success: true, data: models[0] as Model };
+        return await finalize();
     }
 
-    save(
-        model: Model
-    ): MethodFailure<Record<"general", string> | SchemaErrors<Schema>> | MethodReturn<Model> {
+    async findAndDelete(
+        params: PartialSchema<Schema>
+    ): Promise<MethodFailure | MethodReturn<Array<Model>>>;
+    async findAndDelete(
+        predicate: SchemaPredicate<Schema>
+    ): Promise<MethodFailure | MethodReturn<Array<Model>>>;
+    async findAndDelete(
+        lookup: Lookup<Schema>
+    ): Promise<MethodFailure | MethodReturn<Array<Model>>> {
         if (!this.ready) {
             return {
                 success: false,
@@ -578,42 +700,110 @@ class Datastore<
             };
         }
 
-        const parse = this.schema.safeParse(model);
-        if (!parse.success) {
-            const errors: SchemaErrors<Schema> = {};
-            z.treeifyError(
-                parse.error,
-                (issue) => (errors[issue.path[0] as keyof z.infer<Schema>] = issue.message)
-            );
-            return { success: false, errors };
-        }
+        const cache = new Map<number, Doc<Schema>>();
+        const matches: Array<Model> = [];
+        const concurrentDeletion = async (ids: Iterable<number>) => {
+            await Promise.all(
+                Array.from(ids).map((id) =>
+                    this.limitConcurrency(async () =>
+                        this.lock(id).runExclusive(async () => {
+                            const record = this.data.get(id);
+                            if (!record) return;
 
-        for (const unique of this.uniques) {
-            if (
-                Object.entries(this.data).some(
-                    ([id, record]) =>
-                        record[unique] === parse.data[unique] && Number(id) !== model.id
+                            const isMatch: boolean = isPartialLookup(lookup, this.schema)
+                                ? deepMatch(record, lookup)
+                                : lookup(record, id);
+                            if (!isMatch) return;
+
+                            cache.set(id, record);
+                            this.data.delete(id);
+                            matches.push(new this.model(record, id));
+                        })
+                    )
                 )
-            ) {
-                return {
-                    success: false,
-                    errors: { [unique]: "Already in use" } as SchemaErrors<Schema>
-                };
+            );
+        };
+
+        const finalize = async (): Promise<MethodFailure | MethodReturn<Array<Model>>> => {
+            if (matches.length === 0) {
+                return { success: false, errors: { general: "No Document Matches" } };
             }
+
+            const write = await this.write();
+            if (!write.success) {
+                await Promise.all(
+                    Array.from(cache.keys()).map((id) =>
+                        this.limitConcurrency(async () =>
+                            this.lock(id).runExclusive(async () =>
+                                this.data.set(id, cache.get(id)!)
+                            )
+                        )
+                    )
+                );
+                return write;
+            }
+
+            return { success: true, data: matches };
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const indexKey of indexed) {
+                    const valueMap: Map<any, Set<number>> = this.index.get(indexKey)!;
+                    if (valueMap.size === 0) continue;
+
+                    const ids: Set<number> | undefined = valueMap.get(lookup[indexKey]);
+                    if (!ids) continue;
+
+                    if (this.uniques.has(indexKey)) {
+                        await concurrentDeletion(ids);
+
+                        return await finalize();
+                    }
+
+                    await concurrentDeletion(ids);
+
+                    if (matches.length === 0) continue;
+
+                    const write = await this.write();
+                    if (!write.success) {
+                        await Promise.all(
+                            Array.from(cache.keys()).map((id) =>
+                                this.limitConcurrency(async () =>
+                                    this.lock(id).runExclusive(async () =>
+                                        this.data.set(id, cache.get(id)!)
+                                    )
+                                )
+                            )
+                        );
+                        return write;
+                    }
+
+                    return { success: true, data: matches };
+                }
+            }
+
+            await concurrentDeletion(this.data.keys());
+
+            return await finalize();
         }
 
-        const cache = this.data;
-        this.data[model.id] = parse.data;
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
+        await concurrentDeletion(this.data.keys());
 
-        return { success: true, data: new this.model(parse.data, model.id) };
+        return await finalize();
     }
 
-    delete(model: Model): MethodFailure | MethodSuccess {
+    async create(
+        record: z.core.input<Schema>
+    ): Promise<
+        MethodFailure<SchemaErrors<Schema> | Record<"general", string>> | MethodReturn<Model>
+    > {
         if (!this.ready) {
             return {
                 success: false,
@@ -621,15 +811,46 @@ class Datastore<
             };
         }
 
-        const cache = this.data;
-        delete this.data[model.id];
-        const write = this.write();
-        if (!write.success) {
-            this.data = cache;
-            return write;
-        }
+        const nextID = this.nextID;
+        return this.lock(nextID).runExclusive(async () => {
+            const parse = await this.schema.safeParseAsync(record);
+            if (!parse.success) {
+                return this.schemaErrorFailure(parse);
+            }
 
-        return { success: true };
+            let error: MethodFailure<SchemaErrors<Schema>> | undefined;
+            await Promise.all(
+                Array.from(this.uniques).map((key) =>
+                    this.limitConcurrency(async () => {
+                        if (error) return;
+
+                        if (
+                            Array.from(this.data.values()).some(
+                                (record) => record[key] === parse.data[key]
+                            )
+                        ) {
+                            error = {
+                                success: false,
+                                errors: {
+                                    [key]: "Already in use"
+                                } as SchemaErrors<Schema>
+                            };
+                        }
+                    })
+                )
+            );
+
+            if (error) return error;
+
+            this.data.set(nextID, parse.data);
+            const write = await this.write();
+            if (!write.success) {
+                this.data.delete(nextID);
+                return write;
+            }
+
+            return { success: true, data: new this.model(parse.data, nextID) };
+        });
     }
 }
 
@@ -642,7 +863,7 @@ export abstract class CollectionModel<Schema extends z.ZodObject> {
         this.schema = schema;
     }
 
-    get json(): Prettier<{ id: number } & z.core.output<Schema>> {
+    get json(): DocWithID<Schema> {
         const parsed = this.schema.safeParse(this);
         if (!parsed.success) {
             const errors: SchemaErrors<Schema> = {};

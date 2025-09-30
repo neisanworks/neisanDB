@@ -8,6 +8,18 @@ export type DeepPartial<T extends Record<string | number | symbol, any>> = {
     [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
 };
 
+// Zod Types
+export type ParseFailure<Schema extends z.ZodObject> = z.ZodSafeParseError<
+    | z.core.output<Schema>
+    | z.core.$InferObjectOutput<
+          { [k in keyof Schema["shape"]]: z.ZodOptional<Schema["shape"][k]> },
+          {}
+      >
+    >;
+export type Doc<Schema extends z.ZodObject> = z.core.output<Schema>;
+export type DocWithID<Schema extends z.ZodObject> = Prettier<{ id: number } & Doc<Schema>>;
+export type SchemaKey<Schema extends z.ZodObject> = keyof z.core.output<Schema>;
+
 // Method Return Types
 export type MethodSuccess = { success: true };
 export type MethodReturn<Return> = Prettier<MethodSuccess & { data: Return }>;
@@ -35,12 +47,14 @@ export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProp
     autoload?: boolean;
     uniques?: Array<keyof z.core.output<Schema>>;
     indexes?: Array<keyof z.core.output<Schema>>;
+    concurrencyLimit?: number;
 }
 export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.output<Schema>>;
-export type FilterLookup<Schema extends z.ZodObject> = (record: {
-    id: number;
-    doc: z.core.output<Schema>;
-}) => boolean;
+export type SchemaPredicate<Schema extends z.ZodObject> = (record: z.core.output<Schema>, id: number) => boolean;
+export type Lookup<Schema extends z.ZodObject> = PartialSchema<Schema> | SchemaPredicate<Schema>;
+export type RecordUpdate<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> =
+    | PartialSchema<Schema>
+    | ((model: Model) => Model);
 
 // Database Model Types
 export type DBModelProperties<Schema extends z.ZodObject> = {

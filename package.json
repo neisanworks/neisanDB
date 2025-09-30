@@ -1,7 +1,7 @@
 {
     "name": "@neisanworks/neisandb",
     "description": "A lightweight, file-backed database powered by Zod and Bun, designed for model-based schemas.",
-    "version": "0.1.15",
+    "version": "0.1.16",
     "author": "@neisanworks",
     "license": "MIT",
     "type": "module",
@@ -44,6 +44,8 @@
         "typescript": "^5.3.0"
     },
     "dependencies": {
+        "async-mutex": "^0.5.0",
+        "p-limit": "^7.1.1",
         "zod": "^4.1.5"
     },
     "repository": {
