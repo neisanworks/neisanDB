@@ -92,7 +92,9 @@ class Datastore<
     }
 
     private get nextID(): number {
-        return this.lastID++;
+        const lastID = this.lastID;
+        this.lastID++;
+        return lastID + 1;
     }
 
     constructor(database: Database, params: DSOptions<Schema, Model>) {
