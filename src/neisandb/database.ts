@@ -775,7 +775,7 @@ class Datastore<
             (isPartialLookup(arg_1, this.schema)
                 ? await this.find(arg_1)
                 : await this.find(arg_1)) ?? [];
-        return mappedModels(models, arg_2!);
+        return isModelMatch(arg_2, this.model) ? mappedModels(models, arg_2) : undefined;
     }
 
     async findAndUpdate(
