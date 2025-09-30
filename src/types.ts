@@ -15,7 +15,7 @@ export type ParseFailure<Schema extends z.ZodObject> = z.ZodSafeParseError<
           { [k in keyof Schema["shape"]]: z.ZodOptional<Schema["shape"][k]> },
           {}
       >
-    >;
+>;
 export type Doc<Schema extends z.ZodObject> = z.core.output<Schema>;
 export type DocWithID<Schema extends z.ZodObject> = Prettier<{ id: number } & Doc<Schema>>;
 export type SchemaKey<Schema extends z.ZodObject> = keyof z.core.output<Schema>;
@@ -50,11 +50,18 @@ export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProp
     concurrencyLimit?: number;
 }
 export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.output<Schema>>;
-export type SchemaPredicate<Schema extends z.ZodObject> = (record: z.core.output<Schema>, id: number) => boolean;
+export type SchemaPredicate<Schema extends z.ZodObject> = (
+    record: z.core.output<Schema>,
+    id: number
+) => boolean;
 export type Lookup<Schema extends z.ZodObject> = PartialSchema<Schema> | SchemaPredicate<Schema>;
 export type RecordUpdate<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>> =
     | PartialSchema<Schema>
     | ((model: Model) => Model);
+
+export type ModelMap<Schema extends z.ZodObject, Model extends DBModelProperties<Schema>, T> = (
+    model: Model
+) => T | Promise<T>;
 
 // Database Model Types
 export type DBModelProperties<Schema extends z.ZodObject> = {

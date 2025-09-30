@@ -15,6 +15,7 @@ import type {
     MethodFailure,
     MethodReturn,
     MethodSuccess,
+    ModelMap,
     ParseFailure,
     PartialSchema,
     RecordUpdate,
@@ -22,7 +23,15 @@ import type {
     SchemaKey,
     SchemaPredicate
 } from "../types.js";
-import { deepMatch, ensureDir, ensureFile, isPartialLookup } from "../utils.js";
+import {
+    deepMatch,
+    ensureDir,
+    ensureFile,
+    isAsync,
+    isModelMatch,
+    isPartialLookup,
+    isSync
+} from "../utils.js";
 
 export class Database {
     folder: string;
@@ -322,33 +331,33 @@ class Datastore<
         };
 
         if (isPartialLookup(lookup, this.schema)) {
-          const indexed = new Set<SchemaKey<Schema>>()
-          Object.keys(lookup).forEach(key => {
-            if (this.indexes.has(key as SchemaKey<Schema>)) {
-              indexed.add(key as SchemaKey<Schema>)
+            const indexed = new Set<SchemaKey<Schema>>();
+            Object.keys(lookup).forEach((key) => {
+                if (this.indexes.has(key as SchemaKey<Schema>)) {
+                    indexed.add(key as SchemaKey<Schema>);
+                }
+            });
+            if (indexed.size > 0) {
+                for (const key of indexed) {
+                    const valueIDMap = this.index.get(key)!;
+                    const ids = valueIDMap.get(lookup[key]);
+                    if (!ids) continue;
+
+                    if (this.uniques.has(key)) {
+                        await findMatching(ids);
+                        return model;
+                    }
+
+                    await findMatching(ids);
+                    if (!model) continue;
+
+                    return model;
+                }
             }
-          })
-          if (indexed.size > 0) {
-            for (const key of indexed) {
-              const valueIDMap = this.index.get(key)!
-              const ids = valueIDMap.get(lookup[key])
-              if (!ids) continue;
-
-              if (this.uniques.has(key)) {
-                await findMatching(ids)
-                return model
-              }
-
-              await findMatching(ids)
-              if (!model) continue
-
-              return model
-            }
-          }
         }
 
-        await findMatching(this.data.keys())
-        return model
+        await findMatching(this.data.keys());
+        return model;
     }
 
     async findOneAndUpdate(
@@ -583,6 +592,50 @@ class Datastore<
         await concurrentPushMatching(this.data.keys());
 
         return models.length > 0 ? models : undefined;
+    }
+
+    async findAndMap<T>(map: ModelMap<Schema, Model, T>): Promise<Array<T> | undefined>;
+    async findAndMap<T>(
+        params: PartialSchema<Schema>,
+        map: ModelMap<Schema, Model, T>
+    ): Promise<Array<T> | undefined>;
+    async findAndMap<T>(
+        predicate: SchemaPredicate<Schema>,
+        map: ModelMap<Schema, Model, T>
+    ): Promise<Array<T> | undefined>;
+    async findAndMap<T>(
+        arg_1: Lookup<Schema> | ModelMap<Schema, Model, T>,
+        arg_2?: ModelMap<Schema, Model, T>
+    ): Promise<Array<T> | undefined> {
+        const mappedModels = async (
+            models: Array<Model>,
+            mapper: ModelMap<Schema, Model, T>
+        ): Promise<Array<T> | undefined> => {
+            const results: Array<T> = [];
+            await Promise.all(
+                models.map((model) =>
+                    this.limitConcurrency(async () => {
+                        if (isAsync(mapper)) {
+                            results.push(await mapper(model));
+                        } else if (isSync(mapper)) {
+                            results.push(mapper(model));
+                        }
+                    })
+                )
+            );
+            return results.length > 0 ? results : undefined;
+        };
+
+        if (isModelMatch(arg_1, this.model)) {
+            const models = (await this.find()) ?? [];
+            return mappedModels(models, arg_1);
+        }
+
+        const models =
+            (isPartialLookup(arg_1, this.schema)
+                ? await this.find(arg_1)
+                : await this.find(arg_1)) ?? [];
+        return mappedModels(models, arg_2!);
     }
 
     async findAndUpdate(

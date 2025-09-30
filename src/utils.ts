@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync, type WriteFileOptions } from "fs";
 import { dirname } from "path";
-import type { PartialSchema } from "./types.js";
+import type { DBModel, DBModelProperties, ModelMap, PartialSchema } from "./types.js";
 import z from "zod/v4";
 
 export function ensureDir(directory: string): string {
@@ -60,4 +60,28 @@ export function deepMatch(item: any, partial: any): boolean {
     return Object.entries(partial).every(([key, value]) => {
         return deepMatch(item?.[key], value);
     });
+}
+
+export function isModelMatch<
+    Schema extends z.ZodObject,
+    Model extends DBModelProperties<Schema>,
+    T
+>(arg: unknown, model: DBModel<Schema, Model>): arg is ModelMap<Schema, Model, T> {
+    const ModelMatchFunctionSchema = z.function({
+        input: [z.instanceof(model)],
+        output: z.union([z.any(), z.promise(z.any())])
+    });
+    return ModelMatchFunctionSchema.safeParse(arg).success;
+}
+
+export function isAsync<Args extends Array<any>, T>(
+    func: (...args: Args) => T | Promise<T>
+): func is (...args: Args) => Promise<T> {
+    return func.constructor.name === "AsyncFunction";
+}
+
+export function isSync<Args extends Array<any>, T>(
+    func: (...args: Args) => T | Promise<T>
+): func is (...args: Args) => T {
+    return func.constructor.name !== "AsyncFunction";
 }
