@@ -283,6 +283,74 @@ class Datastore<
         return matchedRecord(this.data.keys());
     }
 
+    async findOne(id: number): Promise<Model | undefined>;
+    async findOne(params: PartialSchema<Schema>): Promise<Model | undefined>;
+    async findOne(filter: SchemaPredicate<Schema>): Promise<Model | undefined>;
+    async findOne(lookup: number | Lookup<Schema>): Promise<Model | undefined> {
+        if (!this.ready) return;
+
+        if (typeof lookup === "number") {
+            const record = this.data.get(lookup);
+            if (!record) return;
+
+            return new this.model(record, lookup);
+        }
+
+        let model: Model | undefined = undefined;
+        const findMatching = async (iterable: Iterable<number>) => {
+            await Promise.all(
+                Array.from(iterable).map((id) =>
+                    this.limitConcurrency(async () => {
+                        if (model) return;
+
+                        return this.lock(id).runExclusive(async () => {
+                            if (model) return;
+
+                            const record = this.data.get(id);
+                            if (!record) return;
+
+                            if (
+                                (typeof lookup === "function" && lookup(record, id)) ||
+                                deepMatch(record, lookup)
+                            ) {
+                                model = new this.model(record, id);
+                            }
+                        });
+                    })
+                )
+            );
+        };
+
+        if (isPartialLookup(lookup, this.schema)) {
+          const indexed = new Set<SchemaKey<Schema>>()
+          Object.keys(lookup).forEach(key => {
+            if (this.indexes.has(key as SchemaKey<Schema>)) {
+              indexed.add(key as SchemaKey<Schema>)
+            }
+          })
+          if (indexed.size > 0) {
+            for (const key of indexed) {
+              const valueIDMap = this.index.get(key)!
+              const ids = valueIDMap.get(lookup[key])
+              if (!ids) continue;
+
+              if (this.uniques.has(key)) {
+                await findMatching(ids)
+                return model
+              }
+
+              await findMatching(ids)
+              if (!model) continue
+
+              return model
+            }
+          }
+        }
+
+        await findMatching(this.data.keys())
+        return model
+    }
+
     async findOneAndUpdate(
         id: number,
         update: RecordUpdate<Schema, Model>
