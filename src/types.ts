@@ -37,6 +37,7 @@ export type SchemaErrors<Schema extends z.ZodObject> = Partial<
 export interface DBOptions {
     folder?: string;
     autoload?: boolean;
+    concurrencyLimit?: number;
 }
 
 // Datastore Types
@@ -47,7 +48,6 @@ export interface DSOptions<Schema extends z.ZodObject, Model extends DBModelProp
     autoload?: boolean;
     uniques?: Array<keyof z.core.output<Schema>>;
     indexes?: Array<keyof z.core.output<Schema>>;
-    concurrencyLimit?: number;
 }
 export type PartialSchema<Schema extends z.ZodObject> = DeepPartial<z.core.output<Schema>>;
 export type SchemaPredicate<Schema extends z.ZodObject> = (

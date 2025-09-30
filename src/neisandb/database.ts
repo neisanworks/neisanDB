@@ -36,12 +36,14 @@ import {
 } from "../utils.js";
 
 export class Database {
-    folder: string;
-    autoload: boolean;
+    readonly folder: string;
+    readonly autoload: boolean;
+    readonly limiter: LimitFunction;
 
     constructor(params: DBOptions) {
         this.folder = ensureDir(params.folder ?? join(process.cwd(), "neisandb"));
         this.autoload = params.autoload ?? true;
+        this.limiter = pLimit(params.concurrencyLimit ?? 10);
     }
 
     collection<
@@ -65,7 +67,7 @@ class Datastore<
     readonly name: string;
     readonly path: string;
     readonly autoload: boolean;
-    readonly limitConcurrency: LimitFunction;
+    readonly limiter: LimitFunction;
 
     readonly schema: Schema;
     readonly shape: Shape;
@@ -97,7 +99,7 @@ class Datastore<
         this.name = params.name;
         this.path = ensureFile(join(database.folder, `${this.name}.json`), JSON.stringify({}));
         this.autoload = params.autoload ?? database.autoload;
-        this.limitConcurrency = pLimit(params.concurrencyLimit ?? 10);
+        this.limiter = database.limiter;
         this.schema = params.schema;
         this.shape = params.schema.shape;
         this.model = params.model;
@@ -311,7 +313,7 @@ class Datastore<
         const findMatching = async (iterable: Iterable<number>) => {
             await Promise.all(
                 Array.from(iterable).map((id) =>
-                    this.limitConcurrency(async () => {
+                    this.limiter(async () => {
                         if (model) return;
 
                         return this.lock(id).runExclusive(async () => {
@@ -532,7 +534,7 @@ class Datastore<
         const concurrentPushMatching = async (iterable: Iterable<number>) => {
             await Promise.all(
                 Array.from(iterable).map((id) =>
-                    this.limitConcurrency(async () => {
+                    this.limiter(async () => {
                         if (limit && models.length >= limit) return;
 
                         await this.lock(id).runExclusive(async () => {
@@ -624,7 +626,7 @@ class Datastore<
             const results: Array<T> = [];
             await Promise.all(
                 models.map((model) =>
-                    this.limitConcurrency(async () => {
+                    this.limiter(async () => {
                         let result: T | undefined = undefined;
 
                         if (isAsync(mapper)) {
@@ -695,7 +697,7 @@ class Datastore<
         const concurrentUpdateMatching = async (iterable: Iterable<number>) => {
             await Promise.all(
                 Array.from(iterable).map((id) =>
-                    this.limitConcurrency(async () => {
+                    this.limiter(async () => {
                         if (errors) return;
 
                         await this.lock(id).runExclusive(async () => {
@@ -844,7 +846,7 @@ class Datastore<
         const concurrentDeletion = async (ids: Iterable<number>) => {
             await Promise.all(
                 Array.from(ids).map((id) =>
-                    this.limitConcurrency(async () =>
+                    this.limiter(async () =>
                         this.lock(id).runExclusive(async () => {
                             const record = this.data.get(id);
                             if (!record) return;
@@ -876,7 +878,7 @@ class Datastore<
             if (!write.success) {
                 await Promise.all(
                     Array.from(cache.keys()).map((id) =>
-                        this.limitConcurrency(async () =>
+                        this.limiter(async () =>
                             this.lock(id).runExclusive(async () =>
                                 this.data.set(id, cache.get(id)!)
                             )
@@ -918,7 +920,7 @@ class Datastore<
                     if (!write.success) {
                         await Promise.all(
                             Array.from(cache.keys()).map((id) =>
-                                this.limitConcurrency(async () =>
+                                this.limiter(async () =>
                                     this.lock(id).runExclusive(async () =>
                                         this.data.set(id, cache.get(id)!)
                                     )
@@ -964,7 +966,7 @@ class Datastore<
             let error: MethodFailure<SchemaErrors<Schema>> | undefined;
             await Promise.all(
                 Array.from(this.uniques).map((key) =>
-                    this.limitConcurrency(async () => {
+                    this.limiter(async () => {
                         if (error) return;
 
                         if (
