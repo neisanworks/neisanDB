@@ -1,22 +1,21 @@
 # @neisanworks/neisandb
 
-> A lightweight, model-driven, file-backed database for TypeScript powered by Zod — perfect for CLIs, small apps, prototyping, and Bun/Node projects.
+> Embedded JSON-first database for TypeScript with Zod validation, model classes, async-safe operations, and blazing-fast lookups.
 
----
+## Type-safe. File-based. Zero-dependencies on heavy ORMs. Great for CLIs, tools, scripts, or offline-first apps.
 
 ## Features
 
-- File-based JSON storage with atomic writes and directory syncing
-- Zod-powered schemas for strict runtime validation and type inference
-- Custom model classes with methods, virtual getters, and schema enforcement
-- Deep partial `.findOne()`, `.find()` querying via object shape or functional filters
-- Indexing record ids using model properties/keys for faster lookups
-- Schema-level uniqueness enforcement across one or more fields
-- Atomic `.create()`, `.save()`, `.delete()` operations with rollback on failure
-- Automatic file creation and folder setup if not present
-- Built-in error handling via consistent return types: `MethodSuccess` or `MethodFailure`
-- Automatic ID management for records
-- Extensible architecture (new collections/models are easy to add)
+- Fully type-safe via TypeScript + Zod
+- Strong runtime validation
+- Class-based models with methods & virtuals
+- Indexed queries & uniqueness constraints
+- Sync + Async support
+- Deep partial lookups
+- Concurrency-safe (async-mutex + p-limit)
+- Atomic file writes (temp + rename)
+- JSON-backed, no server or DB setup
+- Perfect for CLIs, bots, and tools
 
 ---
 
@@ -25,9 +24,11 @@
 ### 1. Install
 
 ```bash
-bun add @neisanworks/neisandb zod
+bun add @neisanworks/neisandb
 # or
-npm install @neisanworks/neisandb zod
+npm install @neisanworks/neisandb
+# or
+pnpm add @neisanworks/neisandb
 ```
 
 ### 2. Define a Schema and Model
@@ -35,7 +36,7 @@ npm install @neisanworks/neisandb zod
 ```ts
 // user.ts
 import { CollectionModel, type DBModelProperties } from "@neisanworks/neisandb";
-import z from "zod/v4"
+import z from "zod/v4";
 
 const UserSchema = z.object({
     email: z.string(),
@@ -44,10 +45,7 @@ const UserSchema = z.object({
 });
 type UserSchema = typeof UserSchema;
 
-class UserModel
-extends CollectionModel<UserSchema> // Handles `id` property and allows for the `json()` method, which validates the data before returning JSON
-implements DBModelProperties<UserSchema> // Ensures the model's properties and types are aligned; Not required, but helpful
-{
+class UserModel extends CollectionModel<UserSchema> implements DBModelProperties<UserSchema> {
     email: string;
     password: string;
     attempts: number;
@@ -59,14 +57,44 @@ implements DBModelProperties<UserSchema> // Ensures the model's properties and t
         this.attempts = data.attempts;
     }
 
-    @property // Virtual properties can be created and used when a record is returned from the datastore
-    locked(): boolean {
-      return this.attempts >= 3
+    get locked(): boolean {
+        return this.attempts >= 3;
     }
 
-    // Methods can be attached to the model and used upon return of a record
     authenticate(password: string): boolean {
         return this.password === password;
+    }
+}
+
+const ProfileSchema = z.object({
+    userID: z.coerce.number().positive(),
+    last: z.string(),
+    first: z.string(),
+    middle: z.string().optional(),
+    email: z.email(),
+    phone: z.coerce.string()
+});
+type ProfileSchema = typeof ProfileSchema;
+
+class ProfileModel
+    extends CollectionModel<ProfileSchema>
+    implements DBModelProperties<ProfileSchema>
+{
+    userID: number;
+    last: string;
+    first: string;
+    middle?: string;
+    email: string;
+    phone: string;
+
+    constructor(data: z.infer<ProfileSchema>, id: number) {
+        super(ProfileSchema, id);
+        this.userID = data.userID;
+        this.last = data.last;
+        this.first = data.first;
+        this.middle = data.middle;
+        this.email = data.email;
+        this.phone = data.phone;
     }
 }
 ```
@@ -78,13 +106,26 @@ implements DBModelProperties<UserSchema> // Ensures the model's properties and t
 import { Database } from "@neisanworks/neisandb";
 import { UserSchema, UserModel } from "./models/user";
 
-const db = new Database({ folder: "./data", autoload: true });
+const db = new Database({
+    folder: "~/src/lib/server/neisandb",
+    autoload: true, // controls when to load data from file; default to true; set to false to lazy-load
+    concurrencyLimit: 25 // shared across all collections; default to max of 10 concurrent processes
+});
 
 const Users = db.collection({
     name: "users",
     schema: UserSchema,
     model: UserModel,
-    uniques: ['email'] // Ensures that no two users have the same email address
+    uniques: ["email"],
+    indexes: ["email"]
+});
+
+const Profiles = db.collection({
+    name: "profiles",
+    schema: ProfileSchema,
+    model: ProfileModel,
+    uniques: ["email", "phone", "userID"],
+    indexes: ["email", "phone", "userID"]
 });
 ```
 
@@ -92,23 +133,32 @@ const Users = db.collection({
 
 ```ts
 // Create a user, receiving `MethodFailure` or `MethodReturn` with the model as `createdUser.data`
-const createUser = Users.create({
+const createUser = await Users.create({
     email: "test@example.com",
-    password: "hunter2",
-    attempts: 0
+    password: "hunter2"
 });
 
 if (createUser.success) {
-    const user = createUser.data;
+    const user = createUser.data; // UserModel is returned once record is created
     console.log("User created:", user.email);
 }
 
 // Find a user
-const user = Users.findOne({ email: "test@example.com" };
+const user = await Users.findOne({ email: "test@example.com" };
 if (found) {
     console.log("Auth success?", user.authenticate("hunter2"));
 }
 ```
+
+---
+
+## Core Concepts
+
+- Schemas: Define shape and validation using `Zod`
+- Models: Extend `CollectionModel` to add methods/computed properties
+- Collections: `.collection({ name, schema, model })` defines a persistent collection
+- Persistence: Each collection is backed by its own `.json` file
+- Validation: All records are parsed via `Zod` — both at creation and update
 
 ---
 
@@ -140,35 +190,134 @@ Example:
 
 ---
 
-## Types Overview
+## - Querying Database
 
-### 1. Type Inference & Validation
-- Full Zod schema integration with `z.core.input<Schema>` and `z.core.output<Schema>` types
-- Strongly typed model creation and updates
-- `CollectionModel` ensures that instances are always schema-valid
+NeisanDB supports three flexible lookup syles:
 
-### 2. Return-Type Safety
-- Explicit method result types via:
-  - `MethodReturn<T> | MethodSuccess` – for successful operations
-  - `MethodFailure<T>` – for failed operations with structured error messages
-- Prevents reliance on exceptions; encourages predictable control flow
+### Find by ID
 
-### 3. Deep Partial Matching
-- `DeepPartial<T>` allows for recursive partial filtering in `.find()` and `.findOne()`
-- `PartialSchema<Schema>` enables safe, schema-aware deep filters
-
-### 4. Flexible querying
-- `FilterLookup<Schema>` allows functional queries:
 ```ts
-Users.find(({ doc }) => doc.email.includes('@example.com'))
+await Users.findOne(3);
 ```
 
-### 5. Model Abstraction
-- `DBModel<Schema, Model>` and `DBModelProperties<Schema>` link raw schema types to full class-based models
-- Enables OOP-style behavior with typed `id` property baked in
+### Find by Partial Match
+
+```ts
+await Users.find({ email: "hello@world.dev" });
+```
+
+### Find by Predicate (Sync or Async)
+
+```ts
+await Users.find((user) => user.email.endsWith("@gmail.com"));
+```
+
+## - Query Limit
+
+You can limit your results:
+
+```ts
+await Users.find({ attempts: 0 }, 5);
+```
+
+## - Update Records
+
+```ts
+await Users.findOneAndUpdate(1, { attempts: 3 });
+# or
+await Users.findOneAndUpdate(1, (user) => {
+  user.attempts++;
+  return user;
+});
+```
+
+## - Relationships (Joins) and Mapping/Transformation
+
+```ts
+await Users.findAndMap(
+    async (_, id) => await Profiles.exists({ userID: id }), // Predicate Query: (record, id) => boolean
+    async (user) => { // Model Mapping
+        const profile = (await Profiles.findOne({ userID: user.id }))!;
+        return { ...user.json, ...profile.json }; // Query Return Transformation
+    }
+);
+```
 
 ---
 
-## 📜 License
+## Types Overview
+NeisanDB is designed with type safety at its core. It uses TypeScript’s powerful inference system to keep your models, queries, and results consistent, predictable, and fully typed — without needing manual type gymnastics. Here’s a quick overview of the types behind the scenes.
+
+### 1. Schema-Level Types
+
+| Type | Description |
+|------|-------------|
+| `Doc<Schema>` | The output type of a Zod schema (`z.output<Schema>`) |
+| `DocWithID<Schema>` | Same as `Doc<Schema>`, but with an added `id: number` |
+| `PartialSchema<Schema>` | DeepPartial of the schema output for filtering or partial updates |
+| `SchemaKey<Schema>` | Union of the schema field names as keys |
+| `ParseFailure<Schema>` | Result of a failed Zod parse with full error info |
+
+### 2. Querying and Filtering
+
+| Type | Description |
+|------|-------------|
+| `SchemaPredicate<Schema>` | `(doc, id) => boolean | Promise<boolean>` — used for custom predicates |
+| `Lookup<Schema>` | Union of `PartialSchema` or `SchemaPredicate` — used in `find`, `exists`, etc. |
+| `SyncLookup<Schema>` | Same as above, but only for sync code (`findSync`, etc.) |
+| `RecordUpdate<Schema, Model>` | Used in `.update()` methods; accepts either partial update or `(model) => model` |
+| `ModelMap<Schema, Model, T>` | Mapping/transformation logic for `.findAndMap()` or `.findAndTransform()` |
+
+### 3. Model Definitions
+
+| Type | Description |
+|------|-------------|
+| `DBModelProperties<Schema>` | Base structure of your model: `id` + all schema fields |
+| `DBModel<Schema, Model>` | Constructor signature for any class extending `CollectionModel` |
+| `CollectionModel<Schema>` | Base abstract class to extend for your custom models |
+
+All models extending `CollectionModel`:
+- Are Zod-validated upon `.json` access
+- Can safely define custom methods and computed props
+- Will always have `id` typed and enforced
+
+### 4. Return Types
+
+| Type | Description |
+|------|-------------|
+| `MethodSuccess` | `{ success: true }` — base success shape |
+| `MethodFailure<Errors>` | `{ success: false, errors: Errors }` — returned for any failure |
+| `MethodReturn<T>` | `{ success: true, data: T }` — on success with return data |
+| `SchemaErrors<Schema>` | Partial map of field names to error messages, based on Zod schema |
+
+All public API methods return structured result types — no exceptions or try/catch needed.
+
+```ts
+const result = await Users.create({ ... });
+if (!result.success) {
+  console.error(result.errors); // typed errors; { general: string } | Partial<Record<keyof z.infer<Schema>, string>>
+}
+```
+
+---
+
+## Why NeisanDB?
+| Feature	| NeisanDB | lowdb | NeDB | TinyBase |
+| :------ | :------: | :---: | :--: | -------: |
+| Zod Schema Validation | ✔️ | ❌ | ❌ | ❌ |
+| Class-Based Models | ✔️ | ❌ | ❌ | ❌ |
+| Type-Safe Queries | ✔️ | ❌ | ❌ | ❌ |
+| Async-Safe & Concurrent | ✔️ | ⚠️ | ❌ | ⚠️ |
+| Deep Indexing | ✔️ | ❌ | ✔️ | ⚠️ |
+| File-Based Persistence | ✔️ | ✔️ | ✔️ | ❌ |
+
+---
+
+## Contributing
+Found a bug or have an idea? Open an issue or PR.
+
+---
+
+## License
 
 MIT — © 2025 neisanworks

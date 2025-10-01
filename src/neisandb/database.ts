@@ -491,6 +491,49 @@ class Datastore<
         return model;
     }
 
+    async findOneAndTransform<T>(
+        id: number,
+        tranformer: ModelMap<Schema, Model, T>
+    ): Promise<T | undefined>;
+    async findOneAndTransform<T>(
+        params: PartialSchema<Schema>,
+        transformer: ModelMap<Schema, Model, T>
+    ): Promise<T | undefined>;
+    async findOneAndTransform<T>(
+        predicate: SchemaPredicate<Schema>,
+        transformer: ModelMap<Schema, Model, T>
+    ): Promise<T | undefined>;
+    async findOneAndTransform<T>(
+        lookup: number | Lookup<Schema>,
+        transformer: ModelMap<Schema, Model, T>
+    ): Promise<T | undefined> {
+        if (!this.ready) return;
+
+        const transform = async (model: Model): Promise<T | undefined> => {
+            return isSync(transformer) ? transform(model) : await transformer(model);
+        };
+
+        if (typeof lookup === "number") {
+            const record = this.data.get(lookup);
+            if (!record) return;
+
+            const model = new this.model(record, lookup);
+            return await transform(model);
+        }
+
+        if (isPartialLookup(lookup, this.schema)) {
+            const model = await this.findOne(lookup);
+            if (!model) return;
+
+            return await transform(model);
+        }
+
+        const model = await this.findOne(lookup);
+        if (!model) return;
+
+        return await transform(model);
+    }
+
     async findOneAndUpdate(
         id: number,
         update: RecordUpdate<Schema, Model>
