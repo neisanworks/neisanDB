@@ -1,6 +1,6 @@
 {
     "name": "@neisanworks/neisandb",
-    "description": "A lightweight, file-backed database powered by Zod and Bun, designed for model-based schemas.",
+    "description": "Embedded JSON-first database for TypeScript with Zod validation, model classes, async-safe operations, and blazing-fast lookups.",
     "version": "0.1.27",
     "author": "@neisanworks",
     "license": "MIT",
