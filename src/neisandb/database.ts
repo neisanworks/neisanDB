@@ -30,7 +30,7 @@ import {
     ensureDir,
     ensureFile,
     isAsync,
-    isModelMatch,
+    isModelMapper,
     isPartialLookup,
     isSchemaPredicate,
     isSync
@@ -778,7 +778,7 @@ class Datastore<
             return await mappedModels(models, arg_2);
         }
 
-        if (isModelMatch(arg_1, this.model)) {
+        if (isModelMapper(arg_1, this.model)) {
             const models = await this.find();
             return await mappedModels(models, arg_1);
         }

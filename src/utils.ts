@@ -79,7 +79,7 @@ export function isSchemaPredicate<
     return SchemaPredicateSchema.safeParse(func).success;
 }
 
-export function isModelMatch<
+export function isModelMapper<
     Schema extends z.ZodObject,
     Model extends DBModelProperties<Schema>,
     T
