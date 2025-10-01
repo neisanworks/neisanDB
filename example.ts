@@ -35,3 +35,14 @@ const Users = db.collection({
     uniques: ["email"],
     indexes: ["email"]
 });
+
+for (let i = 0; i > 5; i++) {
+    await Users.create({ email: `user${i}@email.domain`, password: `password${i}` });
+}
+
+const mapper = async (user: UserModel) => {
+    return [user.email, user.password];
+};
+
+const mapped = await Users.findAndMap(async (user) => !!user.email, mapper);
+console.log(mapped);

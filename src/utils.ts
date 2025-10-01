@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync, type WriteFileOptions } from "fs";
 import { dirname } from "path";
-import type { DBModel, DBModelProperties, ModelMap, PartialSchema } from "./types.js";
+import type {
+    DBModel,
+    DBModelProperties,
+    ModelMap,
+    PartialSchema,
+    SchemaPredicate
+} from "./types.js";
 import z from "zod/v4";
 
 export function ensureDir(directory: string): string {
@@ -60,6 +66,17 @@ export function deepMatch(item: any, partial: any): boolean {
     return Object.entries(partial).every(([key, value]) => {
         return deepMatch(item?.[key], value);
     });
+}
+
+export function isSchemaPredicate<
+    Schema extends z.ZodObject,
+    Model extends DBModelProperties<Schema>
+>(func: unknown, model: DBModel<Schema, Model>): func is SchemaPredicate<Schema> {
+    const SchemaPredicateSchema = z.function({
+        input: [z.instanceof(model)],
+        output: z.union([z.boolean(), z.promise(z.boolean())])
+    });
+    return SchemaPredicateSchema.safeParse(func).success;
 }
 
 export function isModelMatch<

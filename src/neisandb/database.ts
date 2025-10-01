@@ -32,6 +32,7 @@ import {
     isAsync,
     isModelMatch,
     isPartialLookup,
+    isSchemaPredicate,
     isSync
 } from "../utils.js";
 
@@ -743,20 +744,24 @@ class Datastore<
         arg_1: Lookup<Schema> | ModelMap<Schema, Model, T>,
         arg_2?: ModelMap<Schema, Model, T>
     ): Promise<Array<T> | undefined> {
+        if (!this.ready) return;
+
         const mappedModels = async (
-            models: Array<Model>,
+            models: Iterable<Model> | undefined,
             mapper: ModelMap<Schema, Model, T>
-        ): Promise<Array<T> | undefined> => {
+        ) => {
+            if (!models) return;
+
             const results: Array<T> = [];
             await Promise.all(
-                models.map((model) =>
+                Array.from(models).map((model) =>
                     this.limiter(async () => {
                         let result: T | undefined = undefined;
 
-                        if (isAsync(mapper)) {
-                            result = await mapper(model);
-                        } else if (isSync(mapper)) {
+                        if (isSync(mapper)) {
                             result = mapper(model);
+                        } else {
+                            result = await mapper(model);
                         }
 
                         if (result) results.push(result);
@@ -766,16 +771,24 @@ class Datastore<
             return results.length > 0 ? results : undefined;
         };
 
-        if (isModelMatch(arg_1, this.model)) {
-            const models = (await this.find()) ?? [];
-            return mappedModels(models, arg_1);
+        if (isSchemaPredicate(arg_1, this.model)) {
+            if (!arg_2) return;
+
+            const models = await this.find(arg_1);
+            return await mappedModels(models, arg_2);
         }
 
-        const models =
-            (isPartialLookup(arg_1, this.schema)
-                ? await this.find(arg_1)
-                : await this.find(arg_1)) ?? [];
-        return isModelMatch(arg_2, this.model) ? mappedModels(models, arg_2) : undefined;
+        if (isModelMatch(arg_1, this.model)) {
+            const models = await this.find();
+            return await mappedModels(models, arg_1);
+        }
+
+        if (isPartialLookup(arg_1, this.schema)) {
+            if (!arg_2) return;
+
+            const models = await this.find(arg_1);
+            return await mappedModels(models, arg_2);
+        }
     }
 
     async findAndUpdate(
