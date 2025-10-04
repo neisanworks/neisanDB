@@ -104,6 +104,16 @@ class Datastore<
         this.indexes = new Set(options.indexes);
 
         if (this.autoload) this.read();
+
+        setInterval(() => {
+            if (this.locks.size === 0) return;
+
+            this.locks.forEach(({ mutex, lastUsed }, id) => {
+                if (lastUsed.getTime() + 1000 * 60 * 5 > Date.now() && !mutex.isLocked()) {
+                    this.locks.delete(id);
+                }
+            });
+        }, 1000 * 60);
     }
 
     private async read(): Promise<Failure | Success> {
@@ -113,6 +123,7 @@ class Datastore<
         }
 
         this.data = read.data;
+        this.lastID = Math.max(...this.data.keys(), 0);
         return { success: true };
     }
 
@@ -169,10 +180,7 @@ class Datastore<
         return lastID + 1;
     }
 
-    private async write(): Promise<Failure | Success> {
-        const write = await this.engine.write(this.data);
-        if (!write.success) return write;
-
+    private async buildIndex() {
         this.index.clear();
         await Promise.all(
             Array.from(this.indexes).map((key) =>
@@ -191,6 +199,13 @@ class Datastore<
                 })
             )
         );
+    }
+
+    private async write(): Promise<Failure | Success> {
+        const write = await this.engine.write(this.data);
+        if (!write.success) return write;
+
+        setImmediate(() => this.buildIndex());
 
         return { success: true };
     }

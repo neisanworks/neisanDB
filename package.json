@@ -1,7 +1,7 @@
 {
     "name": "@neisanworks/neisandb",
     "description": "Embedded JSON-first database for TypeScript with Zod validation, model classes, async-safe operations, and blazing-fast lookups.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "author": "@neisanworks",
     "license": "MIT",
     "type": "module",
